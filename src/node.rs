@@ -62,11 +62,7 @@ pub(crate) struct Node<K, V> {
     pub(crate) children: Vec<Child<K, V>>,
 }
 
-impl<K, V> Node<K, V>
-where
-    K: Serialize,
-    V: Serialize,
-{
+impl<K, V> Node<K, V> {
     pub fn new(id: u64) -> Self {
         Self {
             id,
@@ -135,7 +131,7 @@ where
 
         // Serialize the keys and values.
         let keys_raw = bincode::serialize(&self.keys)?;
-        let vals_raw = bincode::serialize(&self.keys)?;
+        let vals_raw = bincode::serialize(&self.vals)?;
 
         // Serialize the children IDs.
         let children_raw = bincode::serialize(
@@ -183,7 +179,11 @@ where
         left
     }
 
-    fn access_child<S>(&mut self, idx: usize, storage: &mut S) -> Result<&mut Node<K, V>, Error>
+    pub(crate) fn access_child<S>(
+        &mut self,
+        idx: usize,
+        storage: &mut S,
+    ) -> Result<&mut Node<K, V>, Error>
     where
         for<'de> K: Deserialize<'de>,
         for<'de> V: Deserialize<'de>,
@@ -423,6 +423,10 @@ where
                 pred.vals.append(&mut succ.vals);
                 pred.children.append(&mut succ.children);
                 assert!(pred.is_full(degree));
+
+                // Deallocate the successor.
+                // This is the only case in which a node completely disappears.
+                storage.dealloc_id(succ.id).map_err(|_| Error::Storage)?;
 
                 return pred.remove(k, degree, storage);
             }

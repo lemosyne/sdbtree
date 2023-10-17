@@ -1,4 +1,5 @@
 pub mod error;
+mod iter;
 mod node;
 
 use embedded_io::{
@@ -6,6 +7,7 @@ use embedded_io::{
     SeekFrom,
 };
 use error::Error;
+use iter::{Iter, Keys, Values};
 use node::{Child, Node};
 use serde::{Deserialize, Serialize};
 use std::mem;
@@ -176,28 +178,18 @@ where
     //     self.root = Node::new();
     // }
 
-    // pub fn iter(&self) -> Iter<'_, K, V> {
-    //     Iter::new(&self.root)
-    // }
+    pub fn iter(&mut self) -> Result<Iter<'_, K, V, S>, Error> {
+        Iter::new(&mut self.root, &mut self.storage)
+    }
 
-    // pub fn keys(&self) -> Keys<'_, K, V> {
-    //     Keys::new(self.iter())
-    // }
+    pub fn keys(&mut self) -> Result<Keys<'_, K, V, S>, Error> {
+        self.iter().map(Keys::new)
+    }
 
-    // pub fn values(&self) -> Values<'_, K, V> {
-    //     Values::new(self.iter())
-    // }
+    pub fn values(&mut self) -> Result<Values<'_, K, V, S>, Error> {
+        self.iter().map(Values::new)
+    }
 }
-
-// impl<K, V> Debug for BKeyTree<K, V>
-// where
-//     K: Debug,
-//     V: Debug,
-// {
-//     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-//         write!(f, "{:?}", self.root)
-//     }
-// }
 
 #[cfg(test)]
 mod tests {
