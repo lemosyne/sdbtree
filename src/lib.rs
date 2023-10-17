@@ -46,6 +46,10 @@ where
         self.len() == 0
     }
 
+    pub fn persist(&mut self) -> Result<u64, Error> {
+        self.root.persist(&mut self.storage)
+    }
+
     pub fn contains(&mut self, k: &K) -> Result<bool, Error> {
         Ok(self.get(k)?.is_some())
     }
@@ -93,27 +97,27 @@ where
         Ok(res)
     }
 
-    // pub fn remove(&mut self, k: &K) -> Option<V>
-    // where
-    //     K: Ord,
-    // {
-    //     self.remove_entry(k).map(|(_, val)| val)
-    // }
+    pub fn remove(&mut self, k: &K) -> Result<Option<V>, Error>
+    where
+        K: Ord,
+    {
+        Ok(self.remove_entry(k)?.map(|(_, val)| val))
+    }
 
-    // pub fn remove_entry(&mut self, k: &K) -> Option<(K, V)>
-    // where
-    //     K: Ord,
-    // {
-    //     if let Some(entry) = self.root.remove(k, self.degree) {
-    //         if !self.root.is_leaf() && self.root.is_empty() {
-    //             self.root = self.root.children.pop().unwrap();
-    //         }
-    //         self.len -= 1;
-    //         Some(entry)
-    //     } else {
-    //         None
-    //     }
-    // }
+    pub fn remove_entry(&mut self, k: &K) -> Result<Option<(K, V)>, Error>
+    where
+        K: Ord,
+    {
+        if let Some(entry) = self.root.remove(k, self.degree, &mut self.storage)? {
+            if !self.root.is_leaf() && self.root.is_empty() {
+                self.root = self.root.children.pop().unwrap().as_option_owned().unwrap();
+            }
+            self.len -= 1;
+            Ok(Some(entry))
+        } else {
+            Ok(None)
+        }
+    }
 
     // pub fn clear(&mut self) {
     //     self.len = 0;

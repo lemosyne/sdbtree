@@ -40,10 +40,10 @@ pub enum Child<K, V> {
 }
 
 impl<K, V> Child<K, V> {
-    pub fn as_option_ref(&self) -> Option<&Node<K, V>> {
-        match *self {
+    pub fn as_option_owned(self) -> Option<Node<K, V>> {
+        match self {
             Child::Unloaded(_) => None,
-            Child::Loaded(ref node) => Some(node),
+            Child::Loaded(node) => Some(node),
         }
     }
 
@@ -117,12 +117,22 @@ where
         })
     }
 
-    pub fn persist<S>(&self, storage: &mut S) -> Result<(), Error>
+    pub fn persist<S>(&self, storage: &mut S) -> Result<u64, Error>
     where
         K: Serialize,
         V: Serialize,
         S: Storage<Id = u64>,
     {
+        // Recursively persist children.
+        for child in &self.children {
+            match child {
+                Child::Loaded(node) => {
+                    node.persist(storage)?;
+                }
+                _ => {}
+            }
+        }
+
         // Serialize the keys and values.
         let keys_raw = bincode::serialize(&self.keys)?;
         let vals_raw = bincode::serialize(&self.keys)?;
@@ -147,7 +157,7 @@ where
         write_length_prefixed_bytes::<S>(&mut writer, &vals_raw)?;
         write_length_prefixed_bytes::<S>(&mut writer, &children_raw)?;
 
-        Ok(())
+        Ok(self.id)
     }
 
     fn find_index(&self, k: &K) -> usize
@@ -181,8 +191,7 @@ where
     {
         match self.children[idx] {
             Child::Unloaded(id) => {
-                let node = Node::load(id, storage)?;
-                self.children[idx] = Child::Loaded(node);
+                self.children[idx] = Child::Loaded(Node::load(id, storage)?);
             }
             _ => {}
         }
@@ -311,209 +320,237 @@ where
         }
     }
 
-    // fn min_key(&self) -> &K {
-    //     let mut node = self;
-    //     while !node.is_leaf() && !node.children.first().unwrap().is_empty() {
-    //         node = node.children.first().unwrap();
-    //     }
-    //     node.keys.first().unwrap()
-    // }
+    fn min_key<S>(&mut self, storage: &mut S) -> Result<&K, Error>
+    where
+        for<'de> K: Ord + Deserialize<'de>,
+        for<'de> V: Deserialize<'de>,
+        S: Storage<Id = u64>,
+    {
+        let mut node = self;
 
-    // fn max_key(&self) -> &K {
-    //     let mut node = self;
-    //     while !node.is_leaf() && !node.children.last().unwrap().is_empty() {
-    //         node = node.children.last().unwrap()
-    //     }
-    //     node.keys.last().unwrap()
-    // }
+        while !node.is_leaf() && !node.access_child(0, storage)?.is_empty() {
+            node = node.children.first_mut().unwrap().as_option_mut().unwrap();
+        }
 
-    // pub fn remove(&mut self, k: &K, degree: usize) -> Option<(K, V)>
-    // where
-    //     K: Ord,
-    // {
-    //     let mut idx = self.find_index(k);
+        Ok(node.keys.first().unwrap())
+    }
 
-    //     // Case 1: Key found in node and node is a leaf.
-    //     if idx < self.len() && self.keys[idx] == *k && self.is_leaf() {
-    //         let key = self.keys.remove(idx);
-    //         let val = self.vals.remove(idx);
-    //         return Some((key, val));
-    //     }
+    fn max_key<S>(&mut self, storage: &mut S) -> Result<&K, Error>
+    where
+        for<'de> K: Ord + Deserialize<'de>,
+        for<'de> V: Deserialize<'de>,
+        S: Storage<Id = u64>,
+    {
+        let mut node = self;
 
-    //     // Case 2: Key found in node and node is an internal node.
-    //     if idx < self.len() && self.keys[idx] == *k && !self.is_leaf() {
-    //         if self.children[idx].len() >= degree {
-    //             // Case 2a: Child node that precedes k has at least t keys.
-    //             let pred = &mut self.children[idx];
+        while !node.is_leaf()
+            && !node
+                .access_child(node.children.len() - 1, storage)?
+                .is_empty()
+        {
+            node = node.children.last_mut().unwrap().as_option_mut().unwrap();
+        }
 
-    //             // Replace key with the predecessor key and recursively delete it.
-    //             // Safety: we won't ever use the reference past this point.
-    //             let pred_key = pred.max_key() as *const _;
-    //             let (mut pred_key, mut pred_val) =
-    //                 pred.remove(unsafe { &*pred_key }, degree).unwrap();
+        Ok(node.keys.last().unwrap())
+    }
 
-    //             // The actual replacement.
-    //             mem::swap(&mut self.keys[idx], &mut pred_key);
-    //             mem::swap(&mut self.vals[idx], &mut pred_val);
+    pub fn remove<S>(
+        &mut self,
+        k: &K,
+        degree: usize,
+        storage: &mut S,
+    ) -> Result<Option<(K, V)>, Error>
+    where
+        for<'de> K: Ord + Deserialize<'de>,
+        for<'de> V: Deserialize<'de>,
+        S: Storage<Id = u64>,
+    {
+        let mut idx = self.find_index(k);
 
-    //             return Some((pred_key, pred_val));
-    //         } else if self.children[idx + 1].len() >= degree {
-    //             // Case 2b: Child node that succeeds k has at least t keys.
-    //             let succ = &mut self.children[idx + 1];
+        // Case 1: Key found in node and node is a leaf.
+        if idx < self.len() && self.keys[idx] == *k && self.is_leaf() {
+            let key = self.keys.remove(idx);
+            let val = self.vals.remove(idx);
+            return Ok(Some((key, val)));
+        }
 
-    //             // Replace key with the successor key and recursively delete it.
-    //             // Safety: we don't ever use the reference past this point.
-    //             let succ_key = succ.min_key() as *const _;
-    //             let (mut succ_key, mut succ_val) =
-    //                 succ.remove(unsafe { &*succ_key }, degree).unwrap();
+        // Case 2: Key found in node and node is an internal node.
+        if idx < self.len() && self.keys[idx] == *k && !self.is_leaf() {
+            if self.access_child(idx, storage)?.len() >= degree {
+                // Case 2a: Child node that precedes k has at least t keys.
+                let pred = &mut self.children[idx].as_option_mut().unwrap();
 
-    //             // The actual replacement.
-    //             mem::swap(&mut self.keys[idx], &mut succ_key);
-    //             mem::swap(&mut self.vals[idx], &mut succ_val);
+                // Replace key with the predecessor key and recursively delete it.
+                // Safety: we won't ever use the reference past this point.
+                let pred_key = pred.max_key(storage)? as *const _;
+                let (mut pred_key, mut pred_val) = pred
+                    .remove(unsafe { &*pred_key }, degree, storage)?
+                    .unwrap();
 
-    //             return Some((succ_key, succ_val));
-    //         } else {
-    //             // Case 2c: Successor and predecessor only have t - 1 keys.
-    //             let key = self.keys.remove(idx);
-    //             let val = self.vals.remove(idx);
+                // The actual replacement.
+                mem::swap(&mut self.keys[idx], &mut pred_key);
+                mem::swap(&mut self.vals[idx], &mut pred_val);
 
-    //             let mut succ = self.children.remove(idx + 1);
-    //             let pred = &mut self.children[idx];
+                return Ok(Some((pred_key, pred_val)));
+            } else if self.access_child(idx + 1, storage)?.len() >= degree {
+                // Case 2b: Child node that succeeds k has at least t keys.
+                let succ = &mut self.children[idx + 1].as_option_mut().unwrap();
 
-    //             // Merge keys, values, and children into predecessor.
-    //             pred.keys.push(key);
-    //             pred.vals.push(val);
-    //             pred.keys.append(&mut succ.keys);
-    //             pred.vals.append(&mut succ.vals);
-    //             pred.children.append(&mut succ.children);
-    //             assert!(pred.is_full(degree));
+                // Replace key with the successor key and recursively delete it.
+                // Safety: we don't ever use the reference past this point.
+                let succ_key = succ.min_key(storage)? as *const _;
+                let (mut succ_key, mut succ_val) = succ
+                    .remove(unsafe { &*succ_key }, degree, storage)?
+                    .unwrap();
 
-    //             return pred.remove(k, degree);
-    //         }
-    //     }
+                // The actual replacement.
+                mem::swap(&mut self.keys[idx], &mut succ_key);
+                mem::swap(&mut self.vals[idx], &mut succ_val);
 
-    //     // If on a leaf, then no appropriate subtree contains the key.
-    //     if self.is_leaf() {
-    //         return None;
-    //     }
+                return Ok(Some((succ_key, succ_val)));
+            } else {
+                // Case 2c: Successor and predecessor only have t - 1 keys.
+                let key = self.keys.remove(idx);
+                let val = self.vals.remove(idx);
 
-    //     // Case 3: Key not found in internal node.
-    //     if self.children[idx].len() + 1 == degree {
-    //         if idx > 0 && self.children[idx - 1].len() >= degree {
-    //             // Case 3a: Immediate left sibling has at least t keys.
+                let mut succ = self.children.remove(idx + 1).as_option_owned().unwrap();
+                let pred = &mut self.children[idx].as_option_mut().unwrap();
 
-    //             // Move key and value from parent down to child.
-    //             {
-    //                 let parent_key = self.keys.remove(idx - 1);
-    //                 let parent_val = self.vals.remove(idx - 1);
+                // Merge keys, values, and children into predecessor.
+                pred.keys.push(key);
+                pred.vals.push(val);
+                pred.keys.append(&mut succ.keys);
+                pred.vals.append(&mut succ.vals);
+                pred.children.append(&mut succ.children);
+                assert!(pred.is_full(degree));
 
-    //                 let mid = &mut self.children[idx];
-    //                 mid.keys.insert(0, parent_key);
-    //                 mid.vals.insert(0, parent_val);
-    //             }
+                return pred.remove(k, degree, storage);
+            }
+        }
 
-    //             // Move rightmost key and value in left sibling to parent.
-    //             {
-    //                 let left = &mut self.children[idx - 1];
-    //                 let left_key = left.keys.pop().unwrap();
-    //                 let left_val = left.vals.pop().unwrap();
+        // If on a leaf, then no appropriate subtree contains the key.
+        if self.is_leaf() {
+            return Ok(None);
+        }
 
-    //                 self.keys.insert(idx - 1, left_key);
-    //                 self.vals.insert(idx - 1, left_val);
-    //             }
+        // Case 3: Key not found in internal node.
+        if self.access_child(idx, storage)?.len() + 1 == degree {
+            if idx > 0 && self.access_child(idx - 1, storage)?.len() >= degree {
+                // Case 3a: Immediate left sibling has at least t keys.
 
-    //             // Move rightmost child in left sibling to child.
-    //             let left = &mut self.children[idx - 1];
-    //             if !left.is_leaf() {
-    //                 let child = left.children.pop().unwrap();
-    //                 self.children[idx].children.insert(0, child);
-    //             }
-    //         } else if idx + 1 < self.children.len() && self.children[idx + 1].len() >= degree {
-    //             // Case 3a: Immediate right sibling has at least t keys.
+                // Move key and value from parent down to child.
+                {
+                    let parent_key = self.keys.remove(idx - 1);
+                    let parent_val = self.vals.remove(idx - 1);
 
-    //             // Move key and value from parent down to child.
-    //             {
-    //                 let parent_key = self.keys.remove(idx);
-    //                 let parent_val = self.vals.remove(idx);
+                    let mid = self.access_child(idx, storage)?;
+                    mid.keys.insert(0, parent_key);
+                    mid.vals.insert(0, parent_val);
+                }
 
-    //                 let mid = &mut self.children[idx];
-    //                 mid.keys.push(parent_key);
-    //                 mid.vals.push(parent_val);
-    //             }
+                // Move rightmost key and value in left sibling to parent.
+                {
+                    let left = self.access_child(idx - 1, storage)?;
+                    let left_key = left.keys.pop().unwrap();
+                    let left_val = left.vals.pop().unwrap();
 
-    //             // Move leftmost key and value in right sibling to parent.
-    //             {
-    //                 let right = &mut self.children[idx + 1];
-    //                 let right_key = right.keys.remove(0);
-    //                 let right_val = right.vals.remove(0);
+                    self.keys.insert(idx - 1, left_key);
+                    self.vals.insert(idx - 1, left_val);
+                }
 
-    //                 self.keys.insert(idx, right_key);
-    //                 self.vals.insert(idx, right_val);
-    //             }
+                // Move rightmost child in left sibling to child.
+                let left = self.access_child(idx - 1, storage)?;
+                if !left.is_leaf() {
+                    let child = left.children.pop().unwrap();
+                    self.access_child(idx, storage)?.children.insert(0, child);
+                }
+            } else if idx + 1 < self.children.len()
+                && self.access_child(idx + 1, storage)?.len() >= degree
+            {
+                // Case 3a: Immediate right sibling has at least t keys.
 
-    //             // Move leftmost child in right sibling to child.
-    //             let right = &mut self.children[idx + 1];
-    //             if !right.is_leaf() {
-    //                 let child = right.children.remove(0);
-    //                 self.children[idx].children.push(child);
-    //             }
-    //         } else if idx > 0 {
-    //             // Case 3b: Merge into left sibling.
+                // Move key and value from parent down to child.
+                {
+                    let parent_key = self.keys.remove(idx);
+                    let parent_val = self.vals.remove(idx);
 
-    //             // Move key and value from parent down to left sibling (merged node).
-    //             {
-    //                 let parent_key = self.keys.remove(idx - 1);
-    //                 let parent_val = self.vals.remove(idx - 1);
+                    let mid = self.access_child(idx, storage)?;
+                    mid.keys.push(parent_key);
+                    mid.vals.push(parent_val);
+                }
 
-    //                 let mid = &mut self.children[idx];
-    //                 let mut mid_keys = mid.keys.drain(..).collect();
-    //                 let mut mid_vals = mid.vals.drain(..).collect();
-    //                 let mut mid_children = mid.children.drain(..).collect();
+                // Move leftmost key and value in right sibling to parent.
+                {
+                    let right = self.access_child(idx + 1, storage)?;
+                    let right_key = right.keys.remove(0);
+                    let right_val = right.vals.remove(0);
 
-    //                 let left = &mut self.children[idx - 1];
-    //                 left.keys.push(parent_key);
-    //                 left.vals.push(parent_val);
+                    self.keys.insert(idx, right_key);
+                    self.vals.insert(idx, right_val);
+                }
 
-    //                 // Merge all keys, values, and children from child into left sibling.
-    //                 left.keys.append(&mut mid_keys);
-    //                 left.vals.append(&mut mid_vals);
-    //                 left.children.append(&mut mid_children);
-    //             }
+                // Move leftmost child in right sibling to child.
+                let right = self.access_child(idx + 1, storage)?;
+                if !right.is_leaf() {
+                    let child = right.children.remove(0);
+                    self.access_child(idx, storage)?.children.push(child);
+                }
+            } else if idx > 0 {
+                // Case 3b: Merge into left sibling.
 
-    //             // Remove the merged child.
-    //             self.children.remove(idx);
+                // Move key and value from parent down to left sibling (merged node).
+                {
+                    let parent_key = self.keys.remove(idx - 1);
+                    let parent_val = self.vals.remove(idx - 1);
 
-    //             // The only case where you fix the child to recurse down.
-    //             idx -= 1;
-    //         } else if idx + 1 < self.children.len() {
-    //             // Case 3b: Merge into right sibling.
+                    let mid = self.access_child(idx, storage)?;
+                    let mut mid_keys = mid.keys.drain(..).collect();
+                    let mut mid_vals = mid.vals.drain(..).collect();
+                    let mut mid_children = mid.children.drain(..).collect();
 
-    //             // Move key and value from parent down to right sibling (merged node).
-    //             {
-    //                 let parent_key = self.keys.remove(idx);
-    //                 let parent_val = self.vals.remove(idx);
+                    let left = self.access_child(idx - 1, storage)?;
+                    left.keys.push(parent_key);
+                    left.vals.push(parent_val);
 
-    //                 let right = &mut self.children[idx + 1];
-    //                 let mut right_keys = right.keys.drain(..).collect();
-    //                 let mut right_vals = right.vals.drain(..).collect();
-    //                 let mut right_children = right.children.drain(..).collect();
+                    // Merge all keys, values, and children from child into left sibling.
+                    left.keys.append(&mut mid_keys);
+                    left.vals.append(&mut mid_vals);
+                    left.children.append(&mut mid_children);
+                }
 
-    //                 let mid = &mut self.children[idx];
-    //                 mid.keys.push(parent_key);
-    //                 mid.vals.push(parent_val);
-    //                 mid.keys.append(&mut right_keys);
-    //                 mid.vals.append(&mut right_vals);
-    //                 mid.children.append(&mut right_children);
-    //             }
+                // Remove the merged child.
+                self.children.remove(idx);
 
-    //             // Remove the right sibling.
-    //             self.children.remove(idx + 1);
-    //         }
-    //     }
+                // The only case where you fix the child to recurse down.
+                idx -= 1;
+            } else if idx + 1 < self.children.len() {
+                // Case 3b: Merge into right sibling.
 
-    //     self.children[idx].remove(k, degree)
-    // }
-    // }
+                // Move key and value from parent down to right sibling (merged node).
+                {
+                    let parent_key = self.keys.remove(idx);
+                    let parent_val = self.vals.remove(idx);
+
+                    let right = self.access_child(idx + 1, storage)?;
+                    let mut right_keys = right.keys.drain(..).collect();
+                    let mut right_vals = right.vals.drain(..).collect();
+                    let mut right_children = right.children.drain(..).collect();
+
+                    let mid = self.access_child(idx, storage)?;
+                    mid.keys.push(parent_key);
+                    mid.vals.push(parent_val);
+                    mid.keys.append(&mut right_keys);
+                    mid.vals.append(&mut right_vals);
+                    mid.children.append(&mut right_children);
+                }
+
+                // Remove the right sibling.
+                self.children.remove(idx + 1);
+            }
+        }
+
+        self.access_child(idx, storage)?.remove(k, degree, storage)
+    }
 
     // impl<K, V> Debug for Node<K, V>
     // where
