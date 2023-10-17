@@ -2,13 +2,14 @@
 pub mod dir;
 
 use embedded_io::blocking::{Read, Seek, Write};
+use std::error::Error;
 
 pub trait Storage {
     /// Type for an object identifier.
     type Id: PartialEq;
 
     /// Type for storage errors.
-    type Error;
+    type Error: Error;
 
     /// Type of handle to read data with.
     type ReadHandle<'a>: Read + Seek

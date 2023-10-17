@@ -6,6 +6,7 @@ edition = "2021"
 [dependencies]
 allocator = { git = "https://github.com/lemosyne/allocator", version = "0.1.0" }
 embedded-io = { git = "https://github.com/euugenechou/embedded-io.git", version = "0.4.0", features = ["std"] }
+thiserror = { version = "1.0.49", optional = true }
 
 [features]
-dir = ["allocator/seq", "embedded-io/std"]
+dir = ["allocator/seq", "embedded-io/std", "dep:thiserror"]

@@ -3,16 +3,29 @@ use allocator::{seq::SequentialAllocator, Allocator};
 use embedded_io::adapters::FromStd;
 use std::{
     fs::{self, File},
-    io::{self, ErrorKind},
+    io,
 };
+use thiserror::Error;
 
 pub struct DirectoryStorage {
     root: String,
     allocator: SequentialAllocator<u64>,
 }
 
+#[derive(Debug, Error)]
+pub enum Error {
+    #[error(transparent)]
+    Io(#[from] io::Error),
+
+    #[error("couldn't allocate ID")]
+    Alloc,
+
+    #[error("couldn't deallocate ID: {0}")]
+    Dealloc(u64),
+}
+
 impl DirectoryStorage {
-    pub fn new(root: &str) -> io::Result<Self> {
+    pub fn new(root: &str) -> Result<Self, Error> {
         fs::create_dir_all(root)?;
 
         Ok(Self {
@@ -28,21 +41,17 @@ impl DirectoryStorage {
 
 impl Storage for DirectoryStorage {
     type Id = u64;
-    type Error = io::Error;
+    type Error = Error;
     type ReadHandle<'a> = FromStd<File>;
     type WriteHandle<'a> = FromStd<File>;
     type RwHandle<'a> = FromStd<File>;
 
     fn alloc_id(&mut self) -> Result<Self::Id, Self::Error> {
-        self.allocator
-            .alloc()
-            .map_err(|_| io::Error::from(ErrorKind::OutOfMemory))
+        self.allocator.alloc().map_err(|_| Error::Alloc)
     }
 
     fn dealloc_id(&mut self, id: Self::Id) -> Result<(), Self::Error> {
-        self.allocator
-            .dealloc(id)
-            .map_err(|_| io::Error::from(ErrorKind::InvalidInput))
+        self.allocator.dealloc(id).map_err(|_| Error::Dealloc(id))
     }
 
     fn read_handle(&mut self, id: &Self::Id) -> Result<Self::ReadHandle<'_>, Self::Error> {
