@@ -1,5 +1,5 @@
 pub mod error;
-mod iter;
+// mod iter; // Broken
 mod node;
 
 use embedded_io::{
@@ -7,7 +7,7 @@ use embedded_io::{
     SeekFrom,
 };
 use error::Error;
-use iter::{Iter, Keys, Values};
+// use iter::{Iter, Keys, Values};
 use node::{Child, Node};
 use serde::{Deserialize, Serialize};
 use std::mem;
@@ -195,17 +195,17 @@ where
         Ok(self.root.id)
     }
 
-    pub fn iter(&mut self) -> Result<Iter<'_, K, V, S>, Error<S::Error>> {
-        Iter::new(&mut self.root, &mut self.storage)
-    }
+    // pub fn iter(&mut self) -> Result<Iter<'_, K, V, S>, Error<S::Error>> {
+    //     Iter::new(&mut self.root, &mut self.storage)
+    // }
 
-    pub fn keys(&mut self) -> Result<Keys<'_, K, V, S>, Error<S::Error>> {
-        self.iter().map(Keys::new)
-    }
+    // pub fn keys(&mut self) -> Result<Keys<'_, K, V, S>, Error<S::Error>> {
+    //     self.iter().map(Keys::new)
+    // }
 
-    pub fn values(&mut self) -> Result<Values<'_, K, V, S>, Error<S::Error>> {
-        self.iter().map(Values::new)
-    }
+    // pub fn values(&mut self) -> Result<Values<'_, K, V, S>, Error<S::Error>> {
+    //     self.iter().map(Values::new)
+    // }
 }
 
 #[cfg(test)]
