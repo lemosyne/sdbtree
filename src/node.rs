@@ -556,6 +556,23 @@ impl<K, V> Node<K, V> {
         self.access_child(idx, storage)?.remove(k, degree, storage)
     }
 
+    pub fn clear<S>(&mut self, storage: &mut S) -> Result<(), Error>
+    where
+        for<'de> K: Ord + Deserialize<'de>,
+        for<'de> V: Deserialize<'de>,
+        S: Storage<Id = u64>,
+    {
+        for idx in 0..self.children.len() {
+            self.access_child(idx, storage)?.clear(storage)?;
+        }
+
+        self.keys.clear();
+        self.vals.clear();
+        self.children.clear();
+
+        Ok(())
+    }
+
     // impl<K, V> Debug for Node<K, V>
     // where
     // K: Debug,

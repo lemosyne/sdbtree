@@ -25,17 +25,34 @@ where
     storage: S,
 }
 
+impl<K, V> BKeyTree<K, V, DirectoryStorage>
+where
+    for<'de> K: Ord + Serialize + Deserialize<'de>,
+    for<'de> V: Serialize + Deserialize<'de>,
+{
+    pub fn new(path: impl AsRef<str>) -> Result<Self, Error> {
+        Self::with_degree(path, DEFAULT_DEGREE)
+    }
+
+    pub fn with_degree(path: impl AsRef<str>, degree: usize) -> Result<Self, Error> {
+        Self::with_storage_and_degree(
+            DirectoryStorage::new(path.as_ref()).map_err(|_| Error::Storage)?,
+            degree,
+        )
+    }
+}
+
 impl<K, V, S> BKeyTree<K, V, S>
 where
     for<'de> K: Ord + Serialize + Deserialize<'de>,
     for<'de> V: Serialize + Deserialize<'de>,
     S: Storage<Id = u64>,
 {
-    pub fn new(storage: S) -> Result<Self, Error> {
-        Self::with_degree(storage, DEFAULT_DEGREE)
+    pub fn with_storage(storage: S) -> Result<Self, Error> {
+        Self::with_storage_and_degree(storage, DEFAULT_DEGREE)
     }
 
-    pub fn with_degree(mut storage: S, degree: usize) -> Result<Self, Error> {
+    pub fn with_storage_and_degree(mut storage: S, degree: usize) -> Result<Self, Error> {
         Ok(Self {
             len: 0,
             degree,
@@ -50,6 +67,10 @@ where
 
     pub fn is_empty(&self) -> bool {
         self.len() == 0
+    }
+
+    pub fn root_id(&self) -> u64 {
+        self.root.id
     }
 
     pub fn load(id: u64, mut storage: S) -> Result<Self, Error> {
@@ -173,10 +194,12 @@ where
         }
     }
 
-    // pub fn clear(&mut self) {
-    //     self.len = 0;
-    //     self.root = Node::new();
-    // }
+    pub fn clear(&mut self) -> Result<u64, Error> {
+        self.len = 0;
+        self.root.clear(&mut self.storage)?;
+        self.root = Node::new(self.storage.alloc_id().map_err(|_| Error::Storage)?);
+        Ok(self.root.id)
+    }
 
     pub fn iter(&mut self) -> Result<Iter<'_, K, V, S>, Error> {
         Iter::new(&mut self.root, &mut self.storage)
@@ -195,10 +218,11 @@ where
 mod tests {
     use super::*;
     use anyhow::Result;
+    use std::fs;
 
     #[test]
     fn it_works() -> Result<()> {
-        let mut tree = BKeyTree::new(DirectoryStorage::new("bkeytreedir")?)?;
+        let mut tree = BKeyTree::new("bkeytreedir")?;
 
         for i in 0..10 {
             assert_eq!(tree.insert(i, i + 1)?, None);
@@ -207,6 +231,8 @@ mod tests {
         for i in 0..10 {
             assert_eq!(tree.remove_entry(&i)?, Some((i, i + 1)));
         }
+
+        let _ = fs::remove_dir_all("bkeytreedir");
 
         Ok(())
     }
