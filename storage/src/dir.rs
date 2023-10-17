@@ -54,12 +54,17 @@ impl Storage for DirectoryStorage {
         self.allocator.dealloc(id).map_err(|_| Error::Dealloc(id))
     }
 
+    fn truncate_id(&mut self, id: &Self::Id, size: u64) -> Result<(), Self::Error> {
+        Ok(File::options()
+            .write(true)
+            .create(true)
+            .open(self.canonicalize(*id))?
+            .set_len(size)?)
+    }
+
     fn read_handle(&mut self, id: &Self::Id) -> Result<Self::ReadHandle<'_>, Self::Error> {
         Ok(FromStd::new(
-            File::options()
-                .read(true)
-                .create(true)
-                .open(self.canonicalize(*id))?,
+            File::options().read(true).open(self.canonicalize(*id))?,
         ))
     }
 

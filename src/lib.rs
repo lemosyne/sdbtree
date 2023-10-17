@@ -37,6 +37,10 @@ where
         Self::with_degree(path, DEFAULT_DEGREE)
     }
 
+    pub fn load(root_id: u64, path: impl AsRef<str>) -> Result<Self, Error<dir::Error>> {
+        Self::load_with_storage(root_id, DirectoryStorage::new(path.as_ref())?)
+    }
+
     pub fn with_degree(path: impl AsRef<str>, degree: usize) -> Result<Self, Error<dir::Error>> {
         Self::with_storage_and_degree(DirectoryStorage::new(path.as_ref())?, degree)
     }
@@ -73,7 +77,7 @@ where
         self.root.id
     }
 
-    pub fn load(id: u64, mut storage: S) -> Result<Self, Error<S::Error>> {
+    pub fn load_with_storage(id: u64, mut storage: S) -> Result<Self, Error<S::Error>> {
         // Load the root node.
         let root = Node::load(id, &mut storage)?;
 
@@ -215,18 +219,40 @@ mod tests {
     use std::fs;
 
     #[test]
-    fn it_works() -> Result<()> {
-        let mut tree = BKeyTree::new("bkeytreedir")?;
+    fn simple() -> Result<()> {
+        let mut tree = BKeyTree::new("/tmp/bkeytreedir-simple")?;
 
-        for i in 0..10 {
+        for i in 0..1000 {
+            assert_eq!(tree.insert(i, i + 1)?, None);
+            assert_eq!(tree.len(), i + 1);
+        }
+
+        for i in 0..1000 {
+            assert_eq!(tree.remove_entry(&i)?, Some((i, i + 1)));
+            assert_eq!(tree.len(), 999 - i);
+        }
+
+        let _ = fs::remove_dir_all("/tmp/bkeytreedir-simple");
+
+        Ok(())
+    }
+
+    #[test]
+    fn reloading() -> Result<()> {
+        let mut tree = BKeyTree::new("/tmp/bkeytreedir-reload")?;
+
+        for i in 0..1000 {
             assert_eq!(tree.insert(i, i + 1)?, None);
         }
+        assert_eq!(tree.len(), 1000);
 
-        for i in 0..10 {
-            assert_eq!(tree.remove_entry(&i)?, Some((i, i + 1)));
+        let mut tree = BKeyTree::load(tree.persist()?, "/tmp/bkeytreedir-reload")?;
+
+        for i in 0..1000 {
+            assert_eq!(tree.get_key_value(&i)?, Some((&i, &(i + 1))));
         }
 
-        let _ = fs::remove_dir_all("bkeytreedir");
+        let _ = fs::remove_dir_all("/tmp/bkeytreedir-reload");
 
         Ok(())
     }

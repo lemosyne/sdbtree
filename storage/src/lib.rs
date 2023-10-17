@@ -33,6 +33,9 @@ pub trait Storage {
     // FIXME: have this take a reference to id
     fn dealloc_id(&mut self, id: Self::Id) -> Result<(), Self::Error>;
 
+    /// Truncates an object `id` to `size` bytes.
+    fn truncate_id(&mut self, id: &Self::Id, size: u64) -> Result<(), Self::Error>;
+
     /// Returns a handle to read data from object `id`.
     fn read_handle(&mut self, id: &Self::Id) -> Result<Self::ReadHandle<'_>, Self::Error>;
 
