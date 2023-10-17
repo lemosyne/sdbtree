@@ -1,0 +1,11 @@
+[package]
+name = "storage"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+allocator = { git = "https://github.com/lemosyne/allocator", version = "0.1.0" }
+embedded-io = { git = "https://github.com/euugenechou/embedded-io.git", version = "0.4.0", features = ["std"] }
+
+[features]
+dir = ["allocator/seq", "embedded-io/std"]
