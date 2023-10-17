@@ -198,3 +198,24 @@ where
 //         write!(f, "{:?}", self.root)
 //     }
 // }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use anyhow::Result;
+
+    #[test]
+    fn it_works() -> Result<()> {
+        let mut tree = BKeyTree::new(DirectoryStorage::new("bkeytreedir")?)?;
+
+        for i in 0..10 {
+            assert_eq!(tree.insert(i, i + 1)?, None);
+        }
+
+        for i in 0..10 {
+            assert_eq!(tree.remove_entry(&i)?, Some((i, i + 1)));
+        }
+
+        Ok(())
+    }
+}
