@@ -1,6 +1,10 @@
 pub mod error;
 mod node;
 
+use embedded_io::{
+    blocking::{Read, Seek, Write},
+    SeekFrom,
+};
 use error::Error;
 use node::{Child, Node};
 use serde::{Deserialize, Serialize};
@@ -46,8 +50,56 @@ where
         self.len() == 0
     }
 
+    pub fn load(id: u64, mut storage: S) -> Result<Self, Error> {
+        // Load the root node.
+        let root = Node::load(id, &mut storage)?;
+
+        // To load with the extra metadata at the end.
+        let mut len_raw = [0; mem::size_of::<u64>()];
+        let mut degree_raw = [0; mem::size_of::<u64>()];
+
+        {
+            let mut reader = storage.read_handle(&root.id).map_err(|_| Error::Storage)?;
+
+            reader
+                .seek(SeekFrom::End(-2 * mem::size_of::<u64>() as i64))
+                .map_err(|_| Error::Storage)?;
+            reader
+                .read_exact(&mut len_raw)
+                .map_err(|_| Error::Storage)?;
+            reader
+                .read_exact(&mut degree_raw)
+                .map_err(|_| Error::Storage)?;
+        }
+
+        Ok(Self {
+            len: u64::from_le_bytes(len_raw) as usize,
+            degree: u64::from_le_bytes(degree_raw) as usize,
+            root,
+            storage,
+        })
+    }
+
     pub fn persist(&mut self) -> Result<u64, Error> {
-        self.root.persist(&mut self.storage)
+        // Persist the root node.
+        self.root.persist(&mut self.storage)?;
+
+        // Acquire a write handle.
+        let mut writer = self
+            .storage
+            .write_handle(&self.root.id)
+            .map_err(|_| Error::Storage)?;
+
+        // Append extra metadata to the end.
+        writer.seek(SeekFrom::End(0)).map_err(|_| Error::Storage)?;
+        writer
+            .write_all(&(self.len as u64).to_le_bytes())
+            .map_err(|_| Error::Storage)?;
+        writer
+            .write_all(&(self.degree as u64).to_le_bytes())
+            .map_err(|_| Error::Storage)?;
+
+        Ok(self.root.id)
     }
 
     pub fn contains(&mut self, k: &K) -> Result<bool, Error> {
