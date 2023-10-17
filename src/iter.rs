@@ -17,7 +17,10 @@ where
     for<'de> V: Deserialize<'de>,
     S: Storage<Id = u64>,
 {
-    pub(crate) fn new(mut root: &'a mut Node<K, V>, storage: &'a mut S) -> Result<Self, Error> {
+    pub(crate) fn new(
+        mut root: &'a mut Node<K, V>,
+        storage: &'a mut S,
+    ) -> Result<Self, Error<S::Error>> {
         let mut nodes = vec![];
         let mut indices = vec![];
 
