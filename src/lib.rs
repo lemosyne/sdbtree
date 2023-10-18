@@ -1,36 +1,45 @@
 pub mod error;
 mod node;
+mod utils;
 
+use crypter::{openssl::Aes256Ctr, Crypter};
 use embedded_io::{
     blocking::{Read, Seek, Write},
     SeekFrom,
 };
 use error::Error;
+use kms::KeyManagementScheme;
 use node::{Child, Node};
-use std::mem;
+use rand::{rngs::ThreadRng, CryptoRng, RngCore};
+use std::{collections::HashSet, marker::PhantomData, mem};
 use storage::{
     dir::{self, DirectoryStorage},
     Storage,
 };
 
 const DEFAULT_DEGREE: usize = 2;
-const SHA3_256_KEY_SZ: usize = 32;
+const AES256CTR_KEY_SZ: usize = 32;
 
 pub(crate) type Key<const N: usize> = [u8; N];
 pub(crate) type BlockId = u64;
 pub(crate) type NodeId = u64;
 
-pub struct BKeyTree<S = DirectoryStorage, const KEY_SZ: usize = SHA3_256_KEY_SZ>
-where
-    S: Storage,
-{
+pub struct BKeyTree<
+    R = ThreadRng,
+    S = DirectoryStorage,
+    C = Aes256Ctr,
+    const KEY_SZ: usize = AES256CTR_KEY_SZ,
+> {
     len: usize,
     degree: usize,
+    updated: HashSet<BlockId>,
     root: Node<KEY_SZ>,
     storage: S,
+    rng: R,
+    pd: PhantomData<C>,
 }
 
-impl BKeyTree<DirectoryStorage, SHA3_256_KEY_SZ> {
+impl BKeyTree<ThreadRng, DirectoryStorage, Aes256Ctr, AES256CTR_KEY_SZ> {
     pub fn new(path: impl AsRef<str>) -> Result<Self, Error<dir::Error>> {
         Self::with_degree(path, DEFAULT_DEGREE)
     }
@@ -44,20 +53,28 @@ impl BKeyTree<DirectoryStorage, SHA3_256_KEY_SZ> {
     }
 }
 
-impl<S, const KEY_SZ: usize> BKeyTree<S, KEY_SZ>
+impl<R, S, C, const KEY_SZ: usize> BKeyTree<R, S, C, KEY_SZ>
 where
+    R: RngCore + CryptoRng + Default,
     S: Storage<Id = u64>,
+    C: Crypter,
 {
     pub fn with_storage(storage: S) -> Result<Self, Error<S::Error>> {
         Self::with_storage_and_degree(storage, DEFAULT_DEGREE)
     }
 
     pub fn with_storage_and_degree(mut storage: S, degree: usize) -> Result<Self, Error<S::Error>> {
+        let mut key = [0; KEY_SZ];
+        R::default().fill_bytes(&mut key);
+
         Ok(Self {
             len: 0,
             degree,
-            root: Node::new(storage.alloc_id()?),
+            updated: HashSet::new(),
+            root: Node::new(storage.alloc_id()?, key),
             storage,
+            rng: R::default(),
+            pd: PhantomData,
         })
     }
 
@@ -95,8 +112,11 @@ where
         Ok(Self {
             len: u64::from_le_bytes(len_raw) as usize,
             degree: u64::from_le_bytes(degree_raw) as usize,
+            updated: HashSet::new(),
             root,
+            rng: R::default(),
             storage,
+            pd: PhantomData,
         })
     }
 
@@ -153,15 +173,73 @@ where
         v: Key<KEY_SZ>,
     ) -> Result<Option<Key<KEY_SZ>>, Error<S::Error>> {
         if self.root.is_full(self.degree) {
-            let mut new_root = Node::new(self.storage.alloc_id()?);
+            let mut new_root =
+                Node::new(self.storage.alloc_id()?, utils::generate_key(&mut self.rng));
+
             mem::swap(&mut self.root, &mut new_root);
+
             self.root.children.push(Child::Loaded(new_root));
-            self.root.split_child(0, self.degree, &mut self.storage)?;
+            self.root.split_child(
+                0,
+                self.degree,
+                &mut self.storage,
+                false,
+                &mut self.rng,
+                &mut self.updated,
+            )?;
         }
 
-        let res = self
-            .root
-            .insert_nonfull(k, v, self.degree, &mut self.storage)?;
+        let res = self.root.insert_nonfull(
+            k,
+            v,
+            self.degree,
+            &mut self.storage,
+            false,
+            &mut self.rng,
+            &mut self.updated,
+        )?;
+
+        if res.is_none() {
+            self.len += 1;
+        }
+
+        Ok(res)
+    }
+
+    pub fn insert_for_update(
+        &mut self,
+        k: BlockId,
+        v: Key<KEY_SZ>,
+    ) -> Result<Option<Key<KEY_SZ>>, Error<S::Error>> {
+        if self.root.is_full(self.degree) {
+            let mut new_root =
+                Node::new(self.storage.alloc_id()?, utils::generate_key(&mut self.rng));
+
+            self.updated.insert(self.root.id);
+            self.updated.insert(new_root.id);
+
+            mem::swap(&mut self.root, &mut new_root);
+
+            self.root.children.push(Child::Loaded(new_root));
+            self.root.split_child(
+                0,
+                self.degree,
+                &mut self.storage,
+                true,
+                &mut self.rng,
+                &mut self.updated,
+            )?;
+        }
+
+        let res = self.root.insert_nonfull(
+            k,
+            v,
+            self.degree,
+            &mut self.storage,
+            true,
+            &mut self.rng,
+            &mut self.updated,
+        )?;
 
         if res.is_none() {
             self.len += 1;
@@ -178,7 +256,15 @@ where
         &mut self,
         k: &BlockId,
     ) -> Result<Option<(BlockId, Key<KEY_SZ>)>, Error<S::Error>> {
-        if let Some(entry) = self.root.remove(k, self.degree, &mut self.storage)? {
+        // We do this to make it easier to mark updated nodes when removing.
+        if !self.contains(k)? {
+            return Ok(None);
+        }
+
+        if let Some(entry) =
+            self.root
+                .remove(k, self.degree, &mut self.storage, &mut self.updated)?
+        {
             if !self.root.is_leaf() && self.root.is_empty() {
                 self.root = self.root.children.pop().unwrap().as_option_owned().unwrap();
             }
@@ -192,53 +278,43 @@ where
     pub fn clear(&mut self) -> Result<NodeId, Error<S::Error>> {
         self.len = 0;
         self.root.clear(&mut self.storage)?;
-        self.root = Node::new(self.storage.alloc_id()?);
+        self.root = Node::new(self.storage.alloc_id()?, utils::generate_key(&mut self.rng));
         Ok(self.root.id)
+    }
+
+    fn generate_key(&mut self) -> Key<KEY_SZ> {
+        let mut key = [0; KEY_SZ];
+        self.rng.fill_bytes(&mut key);
+        key
     }
 }
 
-// #[cfg(test)]
-// mod tests {
-//     use super::*;
-//     use anyhow::Result;
-//     use std::fs;
+impl<R, S, C, const KEY_SZ: usize> KeyManagementScheme for BKeyTree<R, S, C, KEY_SZ>
+where
+    R: RngCore + CryptoRng + Default,
+    S: Storage<Id = u64>,
+    C: Crypter,
+{
+    type Key = Key<KEY_SZ>;
+    type KeyId = BlockId;
+    type Error = Error<S::Error>;
 
-//     #[test]
-//     fn simple() -> Result<()> {
-//         let mut tree = BKeyTree::new("/tmp/bkeytreedir-simple")?;
+    fn derive(&mut self, block_id: Self::KeyId) -> Result<Self::Key, Self::Error> {
+        if let Some(key) = self.get(&block_id)? {
+            return Ok(*key);
+        }
+        let key = self.generate_key();
+        self.insert(block_id, key)?;
+        Ok(key)
+    }
 
-//         for i in 0..1000 {
-//             assert_eq!(tree.insert(i, i + 1)?, None);
-//             assert_eq!(tree.len(), i + 1);
-//         }
+    fn update(&mut self, block_id: Self::KeyId) -> Result<Self::Key, Self::Error> {
+        let key = self.generate_key();
+        self.insert_for_update(block_id, key)?;
+        Ok(key)
+    }
 
-//         for i in 0..1000 {
-//             assert_eq!(tree.remove_entry(&i)?, Some((i, i + 1)));
-//             assert_eq!(tree.len(), 999 - i);
-//         }
-
-//         let _ = fs::remove_dir_all("/tmp/bkeytreedir-simple");
-
-//         Ok(())
-//     }
-
-//     #[test]
-//     fn reloading() -> Result<()> {
-//         let mut tree = BKeyTree::new("/tmp/bkeytreedir-reload")?;
-
-//         for i in 0..1000 {
-//             assert_eq!(tree.insert(i, i + 1)?, None);
-//         }
-//         assert_eq!(tree.len(), 1000);
-
-//         let mut tree = BKeyTree::load(tree.persist()?, "/tmp/bkeytreedir-reload")?;
-
-//         for i in 0..1000 {
-//             assert_eq!(tree.get_key_value(&i)?, Some((&i, &(i + 1))));
-//         }
-
-//         let _ = fs::remove_dir_all("/tmp/bkeytreedir-reload");
-
-//         Ok(())
-//     }
-// }
+    fn commit(&mut self) -> Vec<Self::KeyId> {
+        unimplemented!()
+    }
+}

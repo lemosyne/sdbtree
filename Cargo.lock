@@ -557,6 +557,7 @@ dependencies = [
  "cryptio",
  "embedded-io",
  "kms",
+ "rand",
  "storage",
  "thiserror",
 ]

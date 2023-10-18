@@ -9,6 +9,7 @@ crypter = { git = "https://github.com/lemosyne/crypter.git", features = ["openss
 cryptio = { git = "https://github.com/lemosyne/cryptio.git" }
 embedded-io = { git = "https://github.com/euugenechou/embedded-io.git" }
 kms = { git = "https://github.com/lemosyne/kms.git" }
+rand = "0.8.5"
 storage = { version = "0.1.0", path = "storage", features = ["dir"] }
 thiserror = "1.0.49"
 
