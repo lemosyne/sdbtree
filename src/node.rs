@@ -1,50 +1,22 @@
-use crate::error::Error;
+use crate::{error::Error, BlockId, Key, NodeId};
 use embedded_io::blocking::{Read, Write};
-use serde::{Deserialize, Serialize};
 use std::{cmp::Ordering, mem};
 use storage::Storage;
 
-fn read_length_prefixed_bytes<S>(reader: &mut S::ReadHandle<'_>) -> Result<Vec<u8>, Error<S::Error>>
-where
-    S: Storage,
-{
-    let mut len_raw = [0; mem::size_of::<u64>()];
-    reader.read_exact(&mut len_raw).map_err(|_| Error::Read)?;
-
-    let len = u64::from_le_bytes(len_raw);
-    let mut bytes = vec![0; len as usize];
-    reader.read_exact(&mut bytes).map_err(|_| Error::Read)?;
-
-    Ok(bytes)
-}
-
-fn write_length_prefixed_bytes<S>(
-    writer: &mut S::WriteHandle<'_>,
-    bytes: &[u8],
-) -> Result<(), Error<S::Error>>
-where
-    S: Storage,
-{
-    writer
-        .write_all(&(bytes.len() as u64).to_le_bytes())
-        .map_err(|_| Error::Write)?;
-    Ok(writer.write_all(bytes).map_err(|_| Error::Write)?)
-}
-
-pub enum Child<K, V> {
+pub enum Child<const KEY_SZ: usize> {
     Unloaded(u64),
-    Loaded(Node<K, V>),
+    Loaded(Node<KEY_SZ>),
 }
 
-impl<K, V> Child<K, V> {
-    pub fn as_option_owned(self) -> Option<Node<K, V>> {
+impl<const KEY_SZ: usize> Child<KEY_SZ> {
+    pub fn as_option_owned(self) -> Option<Node<KEY_SZ>> {
         match self {
             Child::Unloaded(_) => None,
             Child::Loaded(node) => Some(node),
         }
     }
 
-    pub fn as_option_mut(&mut self) -> Option<&mut Node<K, V>> {
+    pub fn as_option_mut(&mut self) -> Option<&mut Node<KEY_SZ>> {
         match *self {
             Child::Unloaded(_) => None,
             Child::Loaded(ref mut node) => Some(node),
@@ -52,14 +24,14 @@ impl<K, V> Child<K, V> {
     }
 }
 
-pub(crate) struct Node<K, V> {
-    pub(crate) id: u64,
-    pub(crate) keys: Vec<K>,
-    pub(crate) vals: Vec<V>,
-    pub(crate) children: Vec<Child<K, V>>,
+pub(crate) struct Node<const KEY_SZ: usize> {
+    pub(crate) id: NodeId,
+    pub(crate) keys: Vec<BlockId>,
+    pub(crate) vals: Vec<Key<KEY_SZ>>,
+    pub(crate) children: Vec<Child<KEY_SZ>>,
 }
 
-impl<K, V> Node<K, V> {
+impl<const KEY_SZ: usize> Node<KEY_SZ> {
     pub fn new(id: u64) -> Self {
         Self {
             id,
@@ -87,8 +59,6 @@ impl<K, V> Node<K, V> {
 
     pub fn load<S>(id: u64, storage: &mut S) -> Result<Self, Error<S::Error>>
     where
-        for<'de> K: Deserialize<'de>,
-        for<'de> V: Deserialize<'de>,
         S: Storage<Id = u64>,
     {
         // Acquire a read handle.
@@ -99,22 +69,19 @@ impl<K, V> Node<K, V> {
         let vals_raw = read_length_prefixed_bytes::<S>(&mut reader)?;
         let children_raw = read_length_prefixed_bytes::<S>(&mut reader)?;
 
-        // The array of children will be serialized as a vector of IDs.
-        let children: Vec<u64> =
-            bincode::deserialize(&children_raw).map_err(|_| Error::Deserialization)?;
-
         Ok(Self {
             id,
-            keys: bincode::deserialize(&keys_raw).map_err(|_| Error::Deserialization)?,
-            vals: bincode::deserialize(&vals_raw).map_err(|_| Error::Deserialization)?,
-            children: children.iter().map(|id| Child::Unloaded(*id)).collect(),
+            keys: deserialize_ids(&keys_raw),
+            vals: deserialize_keys(&vals_raw),
+            children: deserialize_ids(&children_raw)
+                .into_iter()
+                .map(|id| Child::Unloaded(id))
+                .collect(),
         })
     }
 
     pub fn persist<S>(&self, storage: &mut S) -> Result<u64, Error<S::Error>>
     where
-        K: Serialize,
-        V: Serialize,
         S: Storage<Id = u64>,
     {
         // Recursively persist children.
@@ -128,11 +95,11 @@ impl<K, V> Node<K, V> {
         }
 
         // Serialize the keys and values.
-        let keys_raw = bincode::serialize(&self.keys).map_err(|_| Error::Serialization)?;
-        let vals_raw = bincode::serialize(&self.vals).map_err(|_| Error::Serialization)?;
+        let keys_raw = serialize_ids(&self.keys);
+        let vals_raw = serialize_keys(&self.vals);
 
         // Serialize the children IDs.
-        let children_raw = bincode::serialize(
+        let children_raw = serialize_ids(
             &self
                 .children
                 .iter()
@@ -141,8 +108,7 @@ impl<K, V> Node<K, V> {
                     Child::Unloaded(id) => *id,
                 })
                 .collect::<Vec<_>>(),
-        )
-        .map_err(|_| Error::Serialization)?;
+        );
 
         // Acquire a write handle.
         let mut writer = storage.write_handle(&self.id)?;
@@ -155,10 +121,7 @@ impl<K, V> Node<K, V> {
         Ok(self.id)
     }
 
-    fn find_index(&self, k: &K) -> usize
-    where
-        K: Ord,
-    {
+    fn find_index(&self, k: &BlockId) -> usize {
         let mut size = self.len();
         let mut left = 0;
         let mut right = size;
@@ -182,10 +145,8 @@ impl<K, V> Node<K, V> {
         &mut self,
         idx: usize,
         storage: &mut S,
-    ) -> Result<&mut Node<K, V>, Error<S::Error>>
+    ) -> Result<&mut Node<KEY_SZ>, Error<S::Error>>
     where
-        for<'de> K: Deserialize<'de>,
-        for<'de> V: Deserialize<'de>,
         S: Storage<Id = u64>,
     {
         match self.children[idx] {
@@ -199,12 +160,10 @@ impl<K, V> Node<K, V> {
 
     pub fn get<S>(
         &mut self,
-        k: &K,
+        k: &BlockId,
         storage: &mut S,
-    ) -> Result<Option<(usize, &Node<K, V>)>, Error<S::Error>>
+    ) -> Result<Option<(usize, &Node<KEY_SZ>)>, Error<S::Error>>
     where
-        for<'de> K: Ord + Deserialize<'de>,
-        for<'de> V: Deserialize<'de>,
         S: Storage<Id = u64>,
     {
         let mut node = self;
@@ -222,12 +181,10 @@ impl<K, V> Node<K, V> {
 
     pub fn get_mut<S>(
         &mut self,
-        k: &K,
+        k: &BlockId,
         storage: &mut S,
-    ) -> Result<Option<(usize, &mut Node<K, V>)>, Error<S::Error>>
+    ) -> Result<Option<(usize, &mut Node<KEY_SZ>)>, Error<S::Error>>
     where
-        for<'de> K: Ord + Deserialize<'de>,
-        for<'de> V: Deserialize<'de>,
         S: Storage<Id = u64>,
     {
         let mut node = self;
@@ -281,14 +238,12 @@ impl<K, V> Node<K, V> {
 
     pub fn insert_nonfull<S>(
         &mut self,
-        k: K,
-        mut v: V,
+        k: BlockId,
+        mut v: Key<KEY_SZ>,
         degree: usize,
         storage: &mut S,
-    ) -> Result<Option<V>, Error<S::Error>>
+    ) -> Result<Option<Key<KEY_SZ>>, Error<S::Error>>
     where
-        for<'de> K: Ord + Deserialize<'de>,
-        for<'de> V: Deserialize<'de>,
         S: Storage<Id = u64>,
     {
         assert!(!self.is_full(degree));
@@ -323,10 +278,8 @@ impl<K, V> Node<K, V> {
         }
     }
 
-    fn min_key<S>(&mut self, storage: &mut S) -> Result<&K, Error<S::Error>>
+    fn min_key<S>(&mut self, storage: &mut S) -> Result<&BlockId, Error<S::Error>>
     where
-        for<'de> K: Ord + Deserialize<'de>,
-        for<'de> V: Deserialize<'de>,
         S: Storage<Id = u64>,
     {
         let mut node = self;
@@ -338,10 +291,8 @@ impl<K, V> Node<K, V> {
         Ok(node.keys.first().unwrap())
     }
 
-    fn max_key<S>(&mut self, storage: &mut S) -> Result<&K, Error<S::Error>>
+    fn max_key<S>(&mut self, storage: &mut S) -> Result<&BlockId, Error<S::Error>>
     where
-        for<'de> K: Ord + Deserialize<'de>,
-        for<'de> V: Deserialize<'de>,
         S: Storage<Id = u64>,
     {
         let mut node = self;
@@ -359,13 +310,11 @@ impl<K, V> Node<K, V> {
 
     pub fn remove<S>(
         &mut self,
-        k: &K,
+        k: &BlockId,
         degree: usize,
         storage: &mut S,
-    ) -> Result<Option<(K, V)>, Error<S::Error>>
+    ) -> Result<Option<(BlockId, Key<KEY_SZ>)>, Error<S::Error>>
     where
-        for<'de> K: Ord + Deserialize<'de>,
-        for<'de> V: Deserialize<'de>,
         S: Storage<Id = u64>,
     {
         let mut idx = self.find_index(k);
@@ -561,8 +510,6 @@ impl<K, V> Node<K, V> {
 
     pub fn clear<S>(&mut self, storage: &mut S) -> Result<(), Error<S::Error>>
     where
-        for<'de> K: Ord + Deserialize<'de>,
-        for<'de> V: Deserialize<'de>,
         S: Storage<Id = u64>,
     {
         for idx in 0..self.children.len() {
@@ -632,4 +579,79 @@ impl<K, V> Node<K, V> {
 
     //     fmt_tree(f, self, String::new(), true, true)
     // }
+}
+
+fn serialize_ids(ids: &[u64]) -> Vec<u8> {
+    let mut ser = vec![];
+
+    ser.extend((ids.len() as u64).to_le_bytes());
+    ser.extend(ids.iter().flat_map(|id| id.to_le_bytes()));
+
+    ser
+}
+
+fn deserialize_ids(ids_raw: &[u8]) -> Vec<u64> {
+    let mut ids = vec![];
+
+    let len = u64::from_le_bytes(ids_raw[..mem::size_of::<u64>()].try_into().unwrap());
+
+    for i in 1..=len {
+        let start = i as usize * mem::size_of::<u64>();
+        let end = start + mem::size_of::<u64>();
+        let id = u64::from_le_bytes(ids_raw[start..end].try_into().unwrap());
+        ids.push(id);
+    }
+
+    ids
+}
+
+fn serialize_keys<const KEY_SZ: usize>(keys: &[Key<KEY_SZ>]) -> Vec<u8> {
+    let mut ser = vec![];
+
+    ser.extend((keys.len() as u64).to_le_bytes());
+    ser.extend(keys.iter().flat_map(|key| key.iter()));
+
+    ser
+}
+
+fn deserialize_keys<const KEY_SZ: usize>(keys_raw: &[u8]) -> Vec<Key<KEY_SZ>> {
+    let mut keys = vec![];
+
+    let len = u64::from_le_bytes(keys_raw[..mem::size_of::<u64>()].try_into().unwrap());
+
+    for i in 1..=len {
+        let start = i as usize * KEY_SZ;
+        let end = start + KEY_SZ;
+        let key = keys_raw[start..end].try_into().unwrap();
+        keys.push(key);
+    }
+
+    keys
+}
+
+fn read_length_prefixed_bytes<S>(reader: &mut S::ReadHandle<'_>) -> Result<Vec<u8>, Error<S::Error>>
+where
+    S: Storage,
+{
+    let mut len_raw = [0; mem::size_of::<u64>()];
+    reader.read_exact(&mut len_raw).map_err(|_| Error::Read)?;
+
+    let len = u64::from_le_bytes(len_raw);
+    let mut bytes = vec![0; len as usize];
+    reader.read_exact(&mut bytes).map_err(|_| Error::Read)?;
+
+    Ok(bytes)
+}
+
+fn write_length_prefixed_bytes<S>(
+    writer: &mut S::WriteHandle<'_>,
+    bytes: &[u8],
+) -> Result<(), Error<S::Error>>
+where
+    S: Storage,
+{
+    writer
+        .write_all(&(bytes.len() as u64).to_le_bytes())
+        .map_err(|_| Error::Write)?;
+    Ok(writer.write_all(bytes).map_err(|_| Error::Write)?)
 }
