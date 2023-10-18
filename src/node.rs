@@ -27,20 +27,20 @@ impl<const KEY_SZ: usize> Child<KEY_SZ> {
 
 pub(crate) struct Node<const KEY_SZ: usize> {
     pub(crate) id: NodeId,
-    pub(crate) key: Key<KEY_SZ>,
     pub(crate) keys: Vec<BlockId>,
     pub(crate) vals: Vec<Key<KEY_SZ>>,
     pub(crate) children: Vec<Child<KEY_SZ>>,
+    pub(crate) children_keys: Vec<Key<KEY_SZ>>,
 }
 
 impl<const KEY_SZ: usize> Node<KEY_SZ> {
-    pub fn new(id: u64, key: Key<KEY_SZ>) -> Self {
+    pub fn new(id: u64) -> Self {
         Self {
             id,
-            key,
             keys: Vec::new(),
             vals: Vec::new(),
             children: Vec::new(),
+            children_keys: Vec::new(),
         }
     }
 
@@ -69,20 +69,21 @@ impl<const KEY_SZ: usize> Node<KEY_SZ> {
         let mut reader = storage.read_handle(&id)?;
 
         // Read the fields, each of which is serialized as a length-prefixed array of bytes.
-        let key_raw = utils::read_length_prefixed_bytes::<C, S, KEY_SZ>(&mut reader, key)?;
         let keys_raw = utils::read_length_prefixed_bytes::<C, S, KEY_SZ>(&mut reader, key)?;
         let vals_raw = utils::read_length_prefixed_bytes::<C, S, KEY_SZ>(&mut reader, key)?;
         let children_raw = utils::read_length_prefixed_bytes::<C, S, KEY_SZ>(&mut reader, key)?;
+        let children_keys_raw =
+            utils::read_length_prefixed_bytes::<C, S, KEY_SZ>(&mut reader, key)?;
 
         Ok(Self {
             id,
-            key: utils::deserialize_keys(&key_raw)[0],
             keys: utils::deserialize_ids(&keys_raw),
             vals: utils::deserialize_keys(&vals_raw),
             children: utils::deserialize_ids(&children_raw)
                 .into_iter()
                 .map(|id| Child::Unloaded(id))
                 .collect(),
+            children_keys: utils::deserialize_keys(&children_keys_raw),
         })
     }
 
@@ -92,10 +93,10 @@ impl<const KEY_SZ: usize> Node<KEY_SZ> {
         S: Storage<Id = u64>,
     {
         // Recursively persist children.
-        for child in &self.children {
+        for (i, child) in self.children.iter().enumerate() {
             match child {
                 Child::Loaded(node) => {
-                    node.persist::<C, S>(self.key, storage)?;
+                    node.persist::<C, S>(self.children_keys[i], storage)?;
                 }
                 _ => {}
             }
@@ -103,9 +104,9 @@ impl<const KEY_SZ: usize> Node<KEY_SZ> {
 
         // Serialize the keys and values.
         // This should really be done in one shot.
-        let key_raw = utils::serialize_keys(&[self.key]);
         let keys_raw = utils::serialize_ids(&self.keys);
         let vals_raw = utils::serialize_keys(&self.vals);
+        let children_keys_raw = utils::serialize_keys(&self.children_keys);
 
         // Serialize the children IDs.
         let children_raw = utils::serialize_ids(
@@ -123,10 +124,10 @@ impl<const KEY_SZ: usize> Node<KEY_SZ> {
         let mut writer = storage.write_handle(&self.id)?;
 
         // Write each of the fields as a length-prefixed array of bytes.
-        utils::write_length_prefixed_bytes::<C, S, KEY_SZ>(&mut writer, &key_raw, key)?;
         utils::write_length_prefixed_bytes::<C, S, KEY_SZ>(&mut writer, &keys_raw, key)?;
         utils::write_length_prefixed_bytes::<C, S, KEY_SZ>(&mut writer, &vals_raw, key)?;
         utils::write_length_prefixed_bytes::<C, S, KEY_SZ>(&mut writer, &children_raw, key)?;
+        utils::write_length_prefixed_bytes::<C, S, KEY_SZ>(&mut writer, &children_keys_raw, key)?;
 
         Ok(self.id)
     }
@@ -151,7 +152,7 @@ impl<const KEY_SZ: usize> Node<KEY_SZ> {
         left
     }
 
-    pub(crate) fn access_child<C, S>(
+    fn access_child<C, S>(
         &mut self,
         idx: usize,
         storage: &mut S,
@@ -162,7 +163,8 @@ impl<const KEY_SZ: usize> Node<KEY_SZ> {
     {
         match self.children[idx] {
             Child::Unloaded(id) => {
-                self.children[idx] = Child::Loaded(Node::load::<C, S>(id, self.key, storage)?);
+                self.children[idx] =
+                    Child::Loaded(Node::load::<C, S>(id, self.children_keys[idx], storage)?);
             }
             _ => {}
         }
@@ -230,7 +232,8 @@ impl<const KEY_SZ: usize> Node<KEY_SZ> {
         // assert!(self.children[idx].is_full(degree));
 
         let left = self.children[idx].as_option_mut().unwrap();
-        let mut right = Self::new(storage.alloc_id()?, utils::generate_key(rng));
+        let mut right = Self::new(storage.alloc_id()?);
+        let right_key = utils::generate_key(rng);
 
         // Move the largest keys and values from the left to the right.
         right.vals.extend(left.vals.drain(degree..));
@@ -243,6 +246,9 @@ impl<const KEY_SZ: usize> Node<KEY_SZ> {
         // Take the left's largest children as well if not a leaf.
         if !left.is_leaf() {
             right.children.extend(left.children.drain(degree..));
+            right
+                .children_keys
+                .extend(left.children_keys.drain(degree..));
         }
 
         // Mark all the nodes we touched.
@@ -252,10 +258,11 @@ impl<const KEY_SZ: usize> Node<KEY_SZ> {
             updated.insert(right.id);
         }
 
-        // Insert new key, value, and right child into the root.
+        // Insert new key, value, right child, and its key into the root.
         self.keys.insert(idx, key);
         self.vals.insert(idx, val);
         self.children.insert(idx + 1, Child::Loaded(right));
+        self.children_keys.insert(idx + 1, right_key);
 
         Ok(())
     }
@@ -415,6 +422,8 @@ impl<const KEY_SZ: usize> Node<KEY_SZ> {
                 let val = self.vals.remove(idx);
 
                 let mut succ = self.children.remove(idx + 1).as_option_owned().unwrap();
+                let _succ_key = self.children_keys.remove(idx + 1);
+
                 let pred = &mut self.children[idx].as_option_mut().unwrap();
 
                 // Merge keys, values, and children into predecessor.
@@ -423,6 +432,7 @@ impl<const KEY_SZ: usize> Node<KEY_SZ> {
                 pred.keys.append(&mut succ.keys);
                 pred.vals.append(&mut succ.vals);
                 pred.children.append(&mut succ.children);
+                pred.children_keys.append(&mut succ.children_keys);
                 assert!(pred.is_full(degree));
 
                 // Deallocate the successor.
@@ -430,7 +440,8 @@ impl<const KEY_SZ: usize> Node<KEY_SZ> {
                 storage.dealloc_id(succ.id)?;
 
                 // Update the nodes that were modified.
-                updated.insert(succ.id);
+                // Since the successor doesn't exist anymore, we can remove it.
+                updated.remove(&succ.id);
                 updated.insert(pred.id);
 
                 return pred.remove::<C, S>(k, degree, storage, updated);
@@ -477,9 +488,11 @@ impl<const KEY_SZ: usize> Node<KEY_SZ> {
                 let left = self.access_child::<C, S>(idx - 1, storage)?;
                 if !left.is_leaf() {
                     let child = left.children.pop().unwrap();
-                    self.access_child::<C, S>(idx, storage)?
-                        .children
-                        .insert(0, child);
+                    let child_key = left.children_keys.pop().unwrap();
+
+                    let mid = self.access_child::<C, S>(idx, storage)?;
+                    mid.children.insert(0, child);
+                    mid.children_keys.insert(0, child_key);
                 }
             } else if idx + 1 < self.children.len()
                 && self.access_child::<C, S>(idx + 1, storage)?.len() >= degree
@@ -516,9 +529,11 @@ impl<const KEY_SZ: usize> Node<KEY_SZ> {
                 let right = self.access_child::<C, S>(idx + 1, storage)?;
                 if !right.is_leaf() {
                     let child = right.children.remove(0);
-                    self.access_child::<C, S>(idx, storage)?
-                        .children
-                        .push(child);
+                    let child_key = right.children_keys.remove(0);
+
+                    let mid = self.access_child::<C, S>(idx, storage)?;
+                    mid.children.push(child);
+                    mid.children_keys.push(child_key);
                 }
             } else if idx > 0 {
                 // Case 3b: Merge into left sibling.
@@ -532,6 +547,7 @@ impl<const KEY_SZ: usize> Node<KEY_SZ> {
                     let mut mid_keys = mid.keys.drain(..).collect();
                     let mut mid_vals = mid.vals.drain(..).collect();
                     let mut mid_children = mid.children.drain(..).collect();
+                    let mut mid_children_keys = mid.children_keys.drain(..).collect();
 
                     // Update the nodes that were modified.
                     updated.insert(mid.id);
@@ -544,6 +560,7 @@ impl<const KEY_SZ: usize> Node<KEY_SZ> {
                     left.keys.append(&mut mid_keys);
                     left.vals.append(&mut mid_vals);
                     left.children.append(&mut mid_children);
+                    left.children_keys.append(&mut mid_children_keys);
 
                     // Update the nodes that were modified.
                     updated.insert(left.id);
@@ -551,6 +568,7 @@ impl<const KEY_SZ: usize> Node<KEY_SZ> {
 
                 // Remove the merged child.
                 self.children.remove(idx);
+                self.children_keys.remove(idx);
 
                 // The only case where you fix the child to recurse down.
                 idx -= 1;
@@ -566,6 +584,7 @@ impl<const KEY_SZ: usize> Node<KEY_SZ> {
                     let mut right_keys = right.keys.drain(..).collect();
                     let mut right_vals = right.vals.drain(..).collect();
                     let mut right_children = right.children.drain(..).collect();
+                    let mut right_children_keys = right.children_keys.drain(..).collect();
 
                     // Update the nodes that were modified.
                     updated.insert(right.id);
@@ -576,6 +595,7 @@ impl<const KEY_SZ: usize> Node<KEY_SZ> {
                     mid.keys.append(&mut right_keys);
                     mid.vals.append(&mut right_vals);
                     mid.children.append(&mut right_children);
+                    mid.children_keys.append(&mut right_children_keys);
 
                     // Update the nodes that were modified.
                     updated.insert(mid.id);
@@ -583,6 +603,7 @@ impl<const KEY_SZ: usize> Node<KEY_SZ> {
 
                 // Remove the right sibling.
                 self.children.remove(idx + 1);
+                self.children_keys.remove(idx + 1);
             }
         }
 
@@ -603,6 +624,7 @@ impl<const KEY_SZ: usize> Node<KEY_SZ> {
         self.keys.clear();
         self.vals.clear();
         self.children.clear();
+        self.children_keys.clear();
 
         Ok(())
     }
@@ -618,8 +640,8 @@ impl<const KEY_SZ: usize> Node<KEY_SZ> {
         R: RngCore + CryptoRng,
         S: Storage<Id = u64>,
     {
-        // Collected into vector to escape the borrow
-        for (idx, id) in self
+        // Update the keys for children that were updated.
+        for idx in self
             .children
             .iter()
             .enumerate()
@@ -627,15 +649,12 @@ impl<const KEY_SZ: usize> Node<KEY_SZ> {
                 Child::Loaded(node) => (i, node.id),
                 Child::Unloaded(id) => (i, *id),
             })
-            .collect::<Vec<_>>()
+            .filter_map(|(idx, id)| updated.contains(&id).then_some(idx))
         {
-            if updated.contains(&id) {
-                let child = self.access_child::<C, S>(idx, storage)?;
-                child.key = utils::generate_key(rng);
-            }
+            self.children_keys[idx] = utils::generate_key(rng);
         }
 
-        // Only recurse down loaded nodes. If they were updated, they must have been brought in.
+        // Only recurse down loaded nodes. If nodes were updated, they must have been brought in.
         for child in self.children.iter_mut() {
             match child {
                 Child::Loaded(node) => node.commit::<C, R, S>(storage, rng, updated)?,

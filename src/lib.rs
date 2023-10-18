@@ -4,6 +4,8 @@ mod node;
 mod test;
 mod utils;
 
+pub use storage; // For re-export
+
 use crypter::{openssl::Aes256Ctr, Crypter};
 use embedded_io::{
     blocking::{Read, Seek, Write},
@@ -14,7 +16,6 @@ use kms::KeyManagementScheme;
 use node::{Child, Node};
 use rand::{rngs::ThreadRng, CryptoRng, RngCore};
 use std::{collections::HashSet, marker::PhantomData, mem};
-pub use storage;
 use storage::{
     dir::{self, DirectoryStorage},
     Storage,
@@ -90,7 +91,7 @@ where
             updated: HashSet::new(),
             updated_blocks: HashSet::new(),
             key,
-            root: Node::new(storage.alloc_id()?, utils::generate_key(&mut R::default())),
+            root: Node::new(storage.alloc_id()?),
             storage,
             rng: R::default(),
             pd: PhantomData,
@@ -198,12 +199,14 @@ where
         v: Key<KEY_SZ>,
     ) -> Result<Option<Key<KEY_SZ>>, Error<S::Error>> {
         if self.root.is_full(self.degree) {
-            let mut new_root =
-                Node::new(self.storage.alloc_id()?, utils::generate_key(&mut self.rng));
+            let mut new_root = Node::new(self.storage.alloc_id()?);
+            let new_root_key = self.generate_key();
 
             mem::swap(&mut self.root, &mut new_root);
 
             self.root.children.push(Child::Loaded(new_root));
+            self.root.children_keys.push(new_root_key);
+
             self.root.split_child(
                 0,
                 self.degree,
@@ -237,8 +240,7 @@ where
         v: Key<KEY_SZ>,
     ) -> Result<Option<Key<KEY_SZ>>, Error<S::Error>> {
         if self.root.is_full(self.degree) {
-            let mut new_root =
-                Node::new(self.storage.alloc_id()?, utils::generate_key(&mut self.rng));
+            let mut new_root = Node::new(self.storage.alloc_id()?);
 
             self.updated.insert(self.root.id);
             self.updated.insert(new_root.id);
@@ -303,7 +305,7 @@ where
     pub fn clear(&mut self) -> Result<NodeId, Error<S::Error>> {
         self.len = 0;
         self.root.clear::<C, S>(&mut self.storage)?;
-        self.root = Node::new(self.storage.alloc_id()?, utils::generate_key(&mut self.rng));
+        self.root = Node::new(self.storage.alloc_id()?);
         Ok(self.root.id)
     }
 
@@ -336,9 +338,7 @@ where
     fn update(&mut self, block_id: Self::KeyId) -> Result<Self::Key, Self::Error> {
         let key = self.generate_key();
         self.insert_for_update(block_id, key)?;
-
         self.updated_blocks.insert(block_id);
-
         Ok(key)
     }
 
