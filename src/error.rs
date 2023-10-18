@@ -17,6 +17,12 @@ pub enum Error<E> {
     #[error("seek error")]
     Seek,
 
+    #[error("encryption error")]
+    Encrypt,
+
+    #[error("decryption error")]
+    Decrypt,
+
     #[error(transparent)]
     Storage(#[from] E),
 

@@ -1,4 +1,5 @@
 use crate::{error::Error, Key};
+use crypter::Crypter;
 use embedded_io::blocking::{Read, Write};
 use rand::{CryptoRng, RngCore};
 use std::mem;
@@ -61,10 +62,12 @@ pub fn deserialize_keys<const KEY_SZ: usize>(keys_raw: &[u8]) -> Vec<Key<KEY_SZ>
     keys
 }
 
-pub fn read_length_prefixed_bytes<S>(
+pub fn read_length_prefixed_bytes<C, S, const KEY_SZ: usize>(
     reader: &mut S::ReadHandle<'_>,
+    key: Key<KEY_SZ>,
 ) -> Result<Vec<u8>, Error<S::Error>>
 where
+    C: Crypter,
     S: Storage,
 {
     let mut len_raw = [0; mem::size_of::<u64>()];
@@ -74,18 +77,23 @@ where
     let mut bytes = vec![0; len as usize];
     reader.read_exact(&mut bytes).map_err(|_| Error::Read)?;
 
-    Ok(bytes)
+    Ok(C::onetime_decrypt(&key, &bytes).map_err(|_| ()).unwrap())
 }
 
-pub fn write_length_prefixed_bytes<S>(
+pub fn write_length_prefixed_bytes<C, S, const KEY_SZ: usize>(
     writer: &mut S::WriteHandle<'_>,
     bytes: &[u8],
+    key: Key<KEY_SZ>,
 ) -> Result<(), Error<S::Error>>
 where
+    C: Crypter,
     S: Storage,
 {
     writer
         .write_all(&(bytes.len() as u64).to_le_bytes())
         .map_err(|_| Error::Write)?;
-    Ok(writer.write_all(bytes).map_err(|_| Error::Write)?)
+
+    let bytes = C::onetime_encrypt(&key, bytes).map_err(|_| ()).unwrap();
+
+    Ok(writer.write_all(&bytes).map_err(|_| Error::Write)?)
 }

@@ -34,6 +34,7 @@ pub struct BKeyTree<
     degree: usize,
     updated: HashSet<NodeId>,
     updated_blocks: HashSet<BlockId>,
+    key: Key<KEY_SZ>,
     root: Node<KEY_SZ>,
     storage: S,
     rng: R,
@@ -41,16 +42,27 @@ pub struct BKeyTree<
 }
 
 impl BKeyTree<ThreadRng, DirectoryStorage, Aes256Ctr, AES256CTR_KEY_SZ> {
-    pub fn new(path: impl AsRef<str>) -> Result<Self, Error<dir::Error>> {
-        Self::with_degree(path, DEFAULT_DEGREE)
+    pub fn new(
+        path: impl AsRef<str>,
+        key: Key<AES256CTR_KEY_SZ>,
+    ) -> Result<Self, Error<dir::Error>> {
+        Self::with_degree(path, key, DEFAULT_DEGREE)
     }
 
-    pub fn load(root_id: u64, path: impl AsRef<str>) -> Result<Self, Error<dir::Error>> {
-        Self::load_with_storage(root_id, DirectoryStorage::new(path.as_ref())?)
+    pub fn load(
+        root_id: u64,
+        path: impl AsRef<str>,
+        key: Key<AES256CTR_KEY_SZ>,
+    ) -> Result<Self, Error<dir::Error>> {
+        Self::load_with_storage(root_id, DirectoryStorage::new(path.as_ref())?, key)
     }
 
-    pub fn with_degree(path: impl AsRef<str>, degree: usize) -> Result<Self, Error<dir::Error>> {
-        Self::with_storage_and_degree(DirectoryStorage::new(path.as_ref())?, degree)
+    pub fn with_degree(
+        path: impl AsRef<str>,
+        key: Key<AES256CTR_KEY_SZ>,
+        degree: usize,
+    ) -> Result<Self, Error<dir::Error>> {
+        Self::with_storage_and_degree(DirectoryStorage::new(path.as_ref())?, key, degree)
     }
 }
 
@@ -60,20 +72,22 @@ where
     S: Storage<Id = u64>,
     C: Crypter,
 {
-    pub fn with_storage(storage: S) -> Result<Self, Error<S::Error>> {
-        Self::with_storage_and_degree(storage, DEFAULT_DEGREE)
+    pub fn with_storage(storage: S, key: Key<KEY_SZ>) -> Result<Self, Error<S::Error>> {
+        Self::with_storage_and_degree(storage, key, DEFAULT_DEGREE)
     }
 
-    pub fn with_storage_and_degree(mut storage: S, degree: usize) -> Result<Self, Error<S::Error>> {
-        let mut key = [0; KEY_SZ];
-        R::default().fill_bytes(&mut key);
-
+    pub fn with_storage_and_degree(
+        mut storage: S,
+        key: Key<KEY_SZ>,
+        degree: usize,
+    ) -> Result<Self, Error<S::Error>> {
         Ok(Self {
             len: 0,
             degree,
             updated: HashSet::new(),
             updated_blocks: HashSet::new(),
-            root: Node::new(storage.alloc_id()?, key),
+            key,
+            root: Node::new(storage.alloc_id()?, utils::generate_key(&mut R::default())),
             storage,
             rng: R::default(),
             pd: PhantomData,
@@ -92,9 +106,13 @@ where
         self.root.id
     }
 
-    pub fn load_with_storage(id: NodeId, mut storage: S) -> Result<Self, Error<S::Error>> {
+    pub fn load_with_storage(
+        id: NodeId,
+        mut storage: S,
+        key: Key<KEY_SZ>,
+    ) -> Result<Self, Error<S::Error>> {
         // Load the root node.
-        let root = Node::load(id, &mut storage)?;
+        let root = Node::load::<C, S>(id, key, &mut storage)?;
 
         // To load with the extra metadata at the end.
         let mut len_raw = [0; mem::size_of::<u64>()];
@@ -116,6 +134,7 @@ where
             degree: u64::from_le_bytes(degree_raw) as usize,
             updated: HashSet::new(),
             updated_blocks: HashSet::new(),
+            key,
             root,
             rng: R::default(),
             storage,
@@ -123,9 +142,9 @@ where
         })
     }
 
-    pub fn persist(&mut self) -> Result<NodeId, Error<S::Error>> {
+    pub fn persist(&mut self) -> Result<(NodeId, Key<KEY_SZ>), Error<S::Error>> {
         // Persist the root node.
-        self.root.persist(&mut self.storage)?;
+        self.root.persist::<C, S>(self.key, &mut self.storage)?;
 
         // Acquire a write handle.
         let mut writer = self.storage.write_handle(&self.root.id)?;
@@ -139,7 +158,7 @@ where
             .write_all(&(self.degree as u64).to_le_bytes())
             .map_err(|_| Error::Write)?;
 
-        Ok(self.root.id)
+        Ok((self.root.id, self.key))
     }
 
     pub fn contains(&mut self, k: &BlockId) -> Result<bool, Error<S::Error>> {
@@ -149,14 +168,14 @@ where
     pub fn get(&mut self, k: &BlockId) -> Result<Option<&Key<KEY_SZ>>, Error<S::Error>> {
         Ok(self
             .root
-            .get(k, &mut self.storage)?
+            .get::<C, S>(k, &mut self.storage)?
             .map(|(idx, node)| &node.vals[idx]))
     }
 
     pub fn get_mut(&mut self, k: &BlockId) -> Result<Option<&mut Key<KEY_SZ>>, Error<S::Error>> {
         Ok(self
             .root
-            .get_mut(k, &mut self.storage)?
+            .get_mut::<C, S>(k, &mut self.storage)?
             .map(|(idx, node)| &mut node.vals[idx]))
     }
 
@@ -166,7 +185,7 @@ where
     ) -> Result<Option<(&BlockId, &Key<KEY_SZ>)>, Error<S::Error>> {
         Ok(self
             .root
-            .get(k, &mut self.storage)?
+            .get::<C, S>(k, &mut self.storage)?
             .map(|(idx, node)| (&node.keys[idx], &node.vals[idx])))
     }
 
@@ -192,7 +211,7 @@ where
             )?;
         }
 
-        let res = self.root.insert_nonfull(
+        let res = self.root.insert_nonfull::<C, R, S>(
             k,
             v,
             self.degree,
@@ -234,7 +253,7 @@ where
             )?;
         }
 
-        let res = self.root.insert_nonfull(
+        let res = self.root.insert_nonfull::<C, R, S>(
             k,
             v,
             self.degree,
@@ -266,7 +285,7 @@ where
 
         if let Some(entry) =
             self.root
-                .remove(k, self.degree, &mut self.storage, &mut self.updated)?
+                .remove::<C, S>(k, self.degree, &mut self.storage, &mut self.updated)?
         {
             if !self.root.is_leaf() && self.root.is_empty() {
                 self.root = self.root.children.pop().unwrap().as_option_owned().unwrap();
@@ -280,7 +299,7 @@ where
 
     pub fn clear(&mut self) -> Result<NodeId, Error<S::Error>> {
         self.len = 0;
-        self.root.clear(&mut self.storage)?;
+        self.root.clear::<C, S>(&mut self.storage)?;
         self.root = Node::new(self.storage.alloc_id()?, utils::generate_key(&mut self.rng));
         Ok(self.root.id)
     }
@@ -323,7 +342,7 @@ where
     // TODO: Fix in key management trait that commit can be fallible.
     fn commit(&mut self) -> Vec<Self::KeyId> {
         self.root
-            .commit(&mut self.storage, &mut self.rng, &mut self.updated)
+            .commit::<C, R, S>(&mut self.storage, &mut self.rng, &mut self.updated)
             .unwrap();
         self.updated.clear();
         self.updated_blocks.drain().collect()
