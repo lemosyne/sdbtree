@@ -1,5 +1,7 @@
 pub mod error;
 mod node;
+#[cfg(test)]
+mod test;
 mod utils;
 
 use crypter::{openssl::Aes256Ctr, Crypter};

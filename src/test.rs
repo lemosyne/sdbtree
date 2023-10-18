@@ -1,45 +1,53 @@
-// #[cfg(test)]
-// mod tests {
-//     use super::*;
-//     use anyhow::Result;
-//     use std::fs;
+use super::*;
+use anyhow::Result;
+use std::{collections::HashMap, fs};
 
-//     #[test]
-//     fn simple() -> Result<()> {
-//         let mut tree = BKeyTree::new("/tmp/bkeytreedir-simple")?;
+#[test]
+fn simple() -> Result<()> {
+    let mut rng = ThreadRng::default();
+    let mut map = HashMap::new();
+    let mut tree = BKeyTree::new("/tmp/bkeytreedir-simple", utils::generate_key(&mut rng))?;
 
-//         for i in 0..1000 {
-//             assert_eq!(tree.insert(i, i + 1)?, None);
-//             assert_eq!(tree.len(), i + 1);
-//         }
+    for block in 0..1000 {
+        let key = utils::generate_key(&mut rng);
+        map.insert(block, key);
+        assert_eq!(tree.insert(block, key)?, None);
+        assert_eq!(tree.len(), block as usize + 1);
+    }
 
-//         for i in 0..1000 {
-//             assert_eq!(tree.remove_entry(&i)?, Some((i, i + 1)));
-//             assert_eq!(tree.len(), 999 - i);
-//         }
+    for block in 0..1000 {
+        let key = map.remove(&block).unwrap();
+        assert_eq!(tree.remove_entry(&block)?, Some((block, key)));
+        assert_eq!(tree.len(), 999 - block as usize);
+    }
 
-//         let _ = fs::remove_dir_all("/tmp/bkeytreedir-simple");
+    let _ = fs::remove_dir_all("/tmp/bkeytreedir-simple");
 
-//         Ok(())
-//     }
+    Ok(())
+}
 
-//     #[test]
-//     fn reloading() -> Result<()> {
-//         let mut tree = BKeyTree::new("/tmp/bkeytreedir-reload")?;
+#[test]
+fn reloading() -> Result<()> {
+    let mut rng = ThreadRng::default();
+    let mut map = HashMap::new();
+    let mut tree = BKeyTree::new("/tmp/bkeytreedir-reload", utils::generate_key(&mut rng))?;
 
-//         for i in 0..1000 {
-//             assert_eq!(tree.insert(i, i + 1)?, None);
-//         }
-//         assert_eq!(tree.len(), 1000);
+    for block in 0..1000 {
+        let key = utils::generate_key(&mut rng);
+        map.insert(block, key);
+        assert_eq!(tree.insert(block, key)?, None);
+        assert_eq!(tree.len(), block as usize + 1);
+    }
 
-//         let mut tree = BKeyTree::load(tree.persist()?, "/tmp/bkeytreedir-reload")?;
+    let (id, key) = tree.persist()?;
+    let mut tree = BKeyTree::load(id, "/tmp/bkeytreedir-reload", key)?;
 
-//         for i in 0..1000 {
-//             assert_eq!(tree.get_key_value(&i)?, Some((&i, &(i + 1))));
-//         }
+    for block in 0..1000 {
+        let key = map.remove(&block).unwrap();
+        assert_eq!(tree.get_key_value(&block)?, Some((&block, &key)));
+    }
 
-//         let _ = fs::remove_dir_all("/tmp/bkeytreedir-reload");
+    let _ = fs::remove_dir_all("/tmp/bkeytreedir-reload");
 
-//         Ok(())
-//     }
-// }
+    Ok(())
+}

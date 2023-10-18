@@ -52,8 +52,8 @@ pub fn deserialize_keys<const KEY_SZ: usize>(keys_raw: &[u8]) -> Vec<Key<KEY_SZ>
 
     let len = u64::from_le_bytes(keys_raw[..mem::size_of::<u64>()].try_into().unwrap());
 
-    for i in 1..=len {
-        let start = i as usize * KEY_SZ;
+    for i in 0..len {
+        let start = i as usize * KEY_SZ + mem::size_of::<u64>();
         let end = start + KEY_SZ;
         let key = keys_raw[start..end].try_into().unwrap();
         keys.push(key);
