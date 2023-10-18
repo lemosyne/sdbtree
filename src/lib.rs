@@ -14,6 +14,7 @@ use kms::KeyManagementScheme;
 use node::{Child, Node};
 use rand::{rngs::ThreadRng, CryptoRng, RngCore};
 use std::{collections::HashSet, marker::PhantomData, mem};
+pub use storage;
 use storage::{
     dir::{self, DirectoryStorage},
     Storage,
