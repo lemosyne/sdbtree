@@ -589,4 +589,42 @@ impl<const KEY_SZ: usize> Node<KEY_SZ> {
 
         Ok(())
     }
+
+    pub fn commit<R, S>(
+        &mut self,
+        storage: &mut S,
+        rng: &mut R,
+        updated: &HashSet<NodeId>,
+    ) -> Result<(), Error<S::Error>>
+    where
+        R: RngCore + CryptoRng,
+        S: Storage<Id = u64>,
+    {
+        // Collected into vector to escape the borrow
+        for (idx, id) in self
+            .children
+            .iter()
+            .enumerate()
+            .map(|(i, child)| match child {
+                Child::Loaded(node) => (i, node.id),
+                Child::Unloaded(id) => (i, *id),
+            })
+            .collect::<Vec<_>>()
+        {
+            if updated.contains(&id) {
+                let child = self.access_child(idx, storage)?;
+                child.key = utils::generate_key(rng);
+            }
+        }
+
+        // Only recurse down loaded nodes. If they were updated, they must have been brought in.
+        for child in self.children.iter_mut() {
+            match child {
+                Child::Loaded(node) => node.commit(storage, rng, updated)?,
+                _ => {}
+            }
+        }
+
+        Ok(())
+    }
 }

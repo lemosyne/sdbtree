@@ -32,7 +32,8 @@ pub struct BKeyTree<
 > {
     len: usize,
     degree: usize,
-    updated: HashSet<BlockId>,
+    updated: HashSet<NodeId>,
+    updated_blocks: HashSet<BlockId>,
     root: Node<KEY_SZ>,
     storage: S,
     rng: R,
@@ -71,6 +72,7 @@ where
             len: 0,
             degree,
             updated: HashSet::new(),
+            updated_blocks: HashSet::new(),
             root: Node::new(storage.alloc_id()?, key),
             storage,
             rng: R::default(),
@@ -113,6 +115,7 @@ where
             len: u64::from_le_bytes(len_raw) as usize,
             degree: u64::from_le_bytes(degree_raw) as usize,
             updated: HashSet::new(),
+            updated_blocks: HashSet::new(),
             root,
             rng: R::default(),
             storage,
@@ -311,10 +314,18 @@ where
     fn update(&mut self, block_id: Self::KeyId) -> Result<Self::Key, Self::Error> {
         let key = self.generate_key();
         self.insert_for_update(block_id, key)?;
+
+        self.updated_blocks.insert(block_id);
+
         Ok(key)
     }
 
+    // TODO: Fix in key management trait that commit can be fallible.
     fn commit(&mut self) -> Vec<Self::KeyId> {
-        unimplemented!()
+        self.root
+            .commit(&mut self.storage, &mut self.rng, &mut self.updated)
+            .unwrap();
+        self.updated.clear();
+        self.updated_blocks.drain().collect()
     }
 }
