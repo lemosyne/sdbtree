@@ -25,7 +25,7 @@ impl<const KEY_SZ: usize> Child<KEY_SZ> {
     }
 }
 
-pub(crate) struct Node<const KEY_SZ: usize> {
+pub struct Node<const KEY_SZ: usize> {
     pub(crate) id: NodeId,
     pub(crate) keys: Vec<BlockId>,
     pub(crate) vals: Vec<Key<KEY_SZ>>,
@@ -188,6 +188,30 @@ impl<const KEY_SZ: usize> Node<KEY_SZ> {
             } else if node.is_leaf() {
                 return Ok(None);
             } else {
+                node = node.access_child::<C, S>(idx, storage)?;
+            }
+        }
+    }
+
+    pub fn get_node_for_persist<C, S>(
+        &mut self,
+        k: &BlockId,
+        mut key: Key<KEY_SZ>,
+        storage: &mut S,
+    ) -> Result<Option<(Key<KEY_SZ>, &Node<KEY_SZ>)>, Error<S::Error>>
+    where
+        C: Crypter,
+        S: Storage<Id = u64>,
+    {
+        let mut node = self;
+        loop {
+            let idx = node.find_index(k);
+            if idx < node.len() && node.keys[idx] == *k {
+                return Ok(Some((key, node)));
+            } else if node.is_leaf() {
+                return Ok(None);
+            } else {
+                key = node.children_keys[idx];
                 node = node.access_child::<C, S>(idx, storage)?;
             }
         }

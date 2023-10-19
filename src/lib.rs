@@ -1,5 +1,5 @@
 pub mod error;
-mod node;
+pub mod node;
 #[cfg(test)]
 mod test;
 mod utils;
@@ -165,6 +165,18 @@ where
         Ok((self.root.id, self.key))
     }
 
+    pub fn persist_block(&mut self, k: &BlockId) -> Result<bool, Error<S::Error>> {
+        if let Some((key, node)) =
+            self.root
+                .get_node_for_persist::<C, S>(k, self.key, &mut self.storage)?
+        {
+            node.persist::<C, S>(key, &mut self.storage)?;
+            Ok(true)
+        } else {
+            Ok(false)
+        }
+    }
+
     pub fn contains(&mut self, k: &BlockId) -> Result<bool, Error<S::Error>> {
         Ok(self.get(k)?.is_some())
     }
@@ -174,6 +186,13 @@ where
             .root
             .get::<C, S>(k, &mut self.storage)?
             .map(|(idx, node)| &node.vals[idx]))
+    }
+
+    pub fn get_node(&mut self, k: &BlockId) -> Result<Option<&Node<KEY_SZ>>, Error<S::Error>> {
+        Ok(self
+            .root
+            .get::<C, S>(k, &mut self.storage)?
+            .map(|(_, node)| node))
     }
 
     pub fn get_mut(&mut self, k: &BlockId) -> Result<Option<&mut Key<KEY_SZ>>, Error<S::Error>> {
