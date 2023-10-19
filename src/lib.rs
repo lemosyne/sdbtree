@@ -15,7 +15,11 @@ use error::Error;
 use kms::KeyManagementScheme;
 use node::{Child, Node};
 use rand::{rngs::ThreadRng, CryptoRng, RngCore};
-use std::{collections::HashSet, marker::PhantomData, mem};
+use std::{
+    collections::{HashMap, HashSet},
+    marker::PhantomData,
+    mem,
+};
 use storage::{
     dir::{self, DirectoryStorage},
     Storage,
@@ -38,6 +42,7 @@ pub struct BKeyTree<
     degree: usize,
     updated: HashSet<NodeId>,
     updated_blocks: HashSet<BlockId>,
+    in_flight_blocks: HashMap<BlockId, Key<KEY_SZ>>,
     key: Key<KEY_SZ>,
     root: Node<KEY_SZ>,
     storage: S,
@@ -90,6 +95,7 @@ where
             degree,
             updated: HashSet::new(),
             updated_blocks: HashSet::new(),
+            in_flight_blocks: HashMap::new(),
             key,
             root: Node::new(storage.alloc_id()?),
             storage,
@@ -126,6 +132,7 @@ where
             degree: u64::from_le_bytes(degree_raw) as usize,
             updated: HashSet::new(),
             updated_blocks: HashSet::new(),
+            in_flight_blocks: HashMap::new(),
             key,
             root,
             rng: R::default(),
@@ -245,6 +252,7 @@ where
             .map(|(idx, node)| (&node.keys[idx], &node.vals[idx])))
     }
 
+    /// Inserts a key without marking any of the nodes touched on the way down as updated.
     pub fn insert(
         &mut self,
         k: BlockId,
@@ -286,6 +294,7 @@ where
         Ok(res)
     }
 
+    /// Inserts a key while marking any of the nodes touched on the way down as updated.
     pub fn insert_for_update(
         &mut self,
         k: BlockId,
@@ -382,24 +391,49 @@ where
         if let Some(key) = self.get(&block_id)? {
             return Ok(*key);
         }
+
+        if let Some(key) = self.in_flight_blocks.get(&block_id) {
+            return Ok(*key);
+        }
+
         let key = self.generate_key();
-        self.insert(block_id, key)?;
+        self.in_flight_blocks.insert(block_id, key);
+
         Ok(key)
     }
 
     fn update(&mut self, block_id: Self::KeyId) -> Result<Self::Key, Self::Error> {
-        let key = self.generate_key();
-        self.insert_for_update(block_id, key)?;
+        let key = self.derive(block_id)?;
         self.updated_blocks.insert(block_id);
         Ok(key)
     }
 
     // TODO: Fix in key management trait that commit can be fallible.
     fn commit(&mut self) -> Vec<Self::KeyId> {
+        // Add any in-flight blocks that haven't been updated.
+        let inflight_blocks = self
+            .in_flight_blocks
+            .iter()
+            .filter_map(|(k, v)| (!self.updated_blocks.contains(k)).then_some((*k, *v)))
+            .collect::<Vec<_>>();
+
+        for (block, key) in inflight_blocks.into_iter() {
+            self.insert_for_update(block, key).unwrap();
+        }
+
+        // This will commit our changes, changing keys as necesssary to updated nodes as blocks.
         self.root
-            .commit::<C, R, S>(&mut self.storage, &mut self.rng, &mut self.updated)
+            .commit::<C, R, S>(
+                &mut self.storage,
+                &mut self.rng,
+                &self.updated,
+                &self.updated_blocks,
+            )
             .unwrap();
+
+        // Clear out our cached updates.
         self.updated.clear();
+        self.in_flight_blocks.clear();
         self.updated_blocks.drain().collect()
     }
 }

@@ -294,7 +294,7 @@ impl<const KEY_SZ: usize> Node<KEY_SZ> {
     pub fn insert_nonfull<C, R, S>(
         &mut self,
         k: BlockId,
-        mut v: Key<KEY_SZ>,
+        v: Key<KEY_SZ>,
         degree: usize,
         storage: &mut S,
         for_update: bool,
@@ -319,19 +319,20 @@ impl<const KEY_SZ: usize> Node<KEY_SZ> {
                 updated.insert(node.id);
             }
 
+            // Insert key and value into non-full node.
             if node.is_leaf() {
-                // Insert key and value into non-full node.
                 if idx < node.len() && k == node.keys[idx] {
-                    // The key already exists, so swap in the value.
-                    mem::swap(&mut node.vals[idx], &mut v);
-                    return Ok(Some(v));
+                    // If key already exists, we'll return that instead
+                    return Ok(Some(node.vals[idx]));
                 } else {
                     // The key doesn't exist yet.
                     node.keys.insert(idx, k);
                     node.vals.insert(idx, v);
                     return Ok(None);
                 }
-            } else {
+            }
+            // Otherwise, we recurse downwards.
+            else {
                 if node.access_child::<C, S>(idx, storage)?.is_full(degree) {
                     // Split the child and determine which child to recurse down.
                     node.split_child(idx, degree, storage, for_update, rng, updated)?;
@@ -344,7 +345,7 @@ impl<const KEY_SZ: usize> Node<KEY_SZ> {
         }
     }
 
-    fn min_key<C, S>(&mut self, storage: &mut S) -> Result<&BlockId, Error<S::Error>>
+    pub fn min_key<C, S>(&mut self, storage: &mut S) -> Result<&BlockId, Error<S::Error>>
     where
         C: Crypter,
         S: Storage<Id = u64>,
@@ -358,7 +359,7 @@ impl<const KEY_SZ: usize> Node<KEY_SZ> {
         Ok(node.keys.first().unwrap())
     }
 
-    fn max_key<C, S>(&mut self, storage: &mut S) -> Result<&BlockId, Error<S::Error>>
+    pub fn max_key<C, S>(&mut self, storage: &mut S) -> Result<&BlockId, Error<S::Error>>
     where
         C: Crypter,
         S: Storage<Id = u64>,
@@ -658,6 +659,7 @@ impl<const KEY_SZ: usize> Node<KEY_SZ> {
         storage: &mut S,
         rng: &mut R,
         updated: &HashSet<NodeId>,
+        updated_blocks: &HashSet<BlockId>,
     ) -> Result<(), Error<S::Error>>
     where
         C: Crypter,
@@ -679,9 +681,17 @@ impl<const KEY_SZ: usize> Node<KEY_SZ> {
         }
 
         // Only recurse down loaded nodes. If nodes were updated, they must have been brought in.
+        // Before we go down, we update any necessary keys in the child.
         for child in self.children.iter_mut() {
             match child {
-                Child::Loaded(node) => node.commit::<C, R, S>(storage, rng, updated)?,
+                Child::Loaded(node) => {
+                    for (i, k) in node.keys.iter_mut().enumerate() {
+                        if updated_blocks.contains(k) {
+                            node.vals[i] = utils::generate_key(rng);
+                        }
+                    }
+                    node.commit::<C, R, S>(storage, rng, updated, updated_blocks)?
+                }
                 _ => {}
             }
         }
