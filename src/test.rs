@@ -40,7 +40,7 @@ fn reloading() -> Result<()> {
     }
 
     let (id, key) = tree.persist()?;
-    let mut tree = BKeyTree::load(id, "/tmp/bkeytreedir-reload", key)?;
+    let mut tree = BKeyTree::reload(id, "/tmp/bkeytreedir-reload", key)?;
 
     for block in 0..1000 {
         let key = map.remove(&block).unwrap();

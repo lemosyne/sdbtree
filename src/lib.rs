@@ -53,12 +53,12 @@ impl BKeyTree<ThreadRng, DirectoryStorage, Aes256Ctr, AES256CTR_KEY_SZ> {
         Self::with_degree(path, key, DEFAULT_DEGREE)
     }
 
-    pub fn load(
+    pub fn reload(
         root_id: u64,
         path: impl AsRef<str>,
         key: Key<AES256CTR_KEY_SZ>,
     ) -> Result<Self, Error<dir::Error>> {
-        Self::load_with_storage(root_id, DirectoryStorage::new(path.as_ref())?, key)
+        Self::reload_with_storage(root_id, DirectoryStorage::new(path.as_ref())?, key)
     }
 
     pub fn with_degree(
@@ -98,19 +98,7 @@ where
         })
     }
 
-    pub fn len(&self) -> usize {
-        self.len
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.len() == 0
-    }
-
-    pub fn root_id(&self) -> u64 {
-        self.root.id
-    }
-
-    pub fn load_with_storage(
+    pub fn reload_with_storage(
         id: NodeId,
         mut storage: S,
         key: Key<KEY_SZ>,
@@ -146,14 +134,46 @@ where
         })
     }
 
+    pub fn load(&mut self, id: NodeId, key: Key<KEY_SZ>) -> Result<(), Error<S::Error>> {
+        // Load the root node.
+        let root = Node::load::<C, S>(id, key, &mut self.storage)?;
+
+        // Load length and degree from the end.
+        let (len, degree) = {
+            let mut len_raw = [0; mem::size_of::<u64>()];
+            let mut degree_raw = [0; mem::size_of::<u64>()];
+
+            let mut reader = self.storage.read_handle(&root.id)?;
+
+            reader
+                .seek(SeekFrom::End(-2 * mem::size_of::<u64>() as i64))
+                .map_err(|_| Error::Seek)?;
+            reader.read_exact(&mut len_raw).map_err(|_| Error::Read)?;
+            reader
+                .read_exact(&mut degree_raw)
+                .map_err(|_| Error::Read)?;
+
+            let len = u64::from_le_bytes(len_raw) as usize;
+            let degree = u64::from_le_bytes(len_raw) as usize;
+
+            (len, degree)
+        };
+
+        // Update state after the fallible operations.
+        self.key = key;
+        self.root = root;
+        self.len = len;
+        self.degree = degree;
+
+        Ok(())
+    }
+
     pub fn persist(&mut self) -> Result<(NodeId, Key<KEY_SZ>), Error<S::Error>> {
         // Persist the root node.
         self.root.persist::<C, S>(self.key, &mut self.storage)?;
 
-        // Acquire a write handle.
+        // Persist length and degree at the end.
         let mut writer = self.storage.write_handle(&self.root.id)?;
-
-        // Append extra metadata to the end.
         writer.seek(SeekFrom::End(0)).map_err(|_| Error::Seek)?;
         writer
             .write_all(&(self.len as u64).to_le_bytes())
@@ -162,6 +182,7 @@ where
             .write_all(&(self.degree as u64).to_le_bytes())
             .map_err(|_| Error::Write)?;
 
+        // Return the root's ID and key.
         Ok((self.root.id, self.key))
     }
 
@@ -175,6 +196,18 @@ where
         } else {
             Ok(false)
         }
+    }
+
+    pub fn len(&self) -> usize {
+        self.len
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    pub fn root_id(&self) -> u64 {
+        self.root.id
     }
 
     pub fn contains(&mut self, k: &BlockId) -> Result<bool, Error<S::Error>> {
