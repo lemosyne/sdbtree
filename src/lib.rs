@@ -182,8 +182,29 @@ where
         block: &BlockId,
         key: Key<KEY_SZ>,
     ) -> Result<bool, Error<S::Error>> {
-        self.root
-            .persist_block::<C, S>(block, key, &mut self.storage)
+        // If the block is in-flight, insert without marking nodes in the path as updated.
+        if let Some(block_key) = self.in_flight_blocks.remove(block) {
+            self.insert(*block, block_key)?;
+        }
+
+        // Persist the block, persisting any nodes along the way.
+        let res = self
+            .root
+            .persist_block::<C, S>(block, key, &mut self.storage)?;
+
+        // Persist length and degree at the end if we persisted the block.
+        if res {
+            let mut writer = self.storage.write_handle(&self.root.id)?;
+            writer.seek(SeekFrom::End(0)).map_err(|_| Error::Seek)?;
+            writer
+                .write_all(&(self.len as u64).to_le_bytes())
+                .map_err(|_| Error::Write)?;
+            writer
+                .write_all(&(self.degree as u64).to_le_bytes())
+                .map_err(|_| Error::Write)?;
+        }
+
+        Ok(res)
     }
 
     pub fn len(&self) -> usize {
