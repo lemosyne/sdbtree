@@ -181,7 +181,7 @@ where
         &mut self,
         block: &BlockId,
         key: Key<KEY_SZ>,
-    ) -> Result<(), Error<S::Error>> {
+    ) -> Result<bool, Error<S::Error>> {
         self.root
             .persist_block::<C, S>(block, key, &mut self.storage)
     }

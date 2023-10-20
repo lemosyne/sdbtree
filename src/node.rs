@@ -92,6 +92,8 @@ impl<const KEY_SZ: usize> Node<KEY_SZ> {
         C: Crypter,
         S: Storage<Id = u64>,
     {
+        self.persist_node::<C, S>(key, storage)?;
+
         for (i, child) in self.children.iter().enumerate() {
             match child {
                 Child::Loaded(node) => {
@@ -101,7 +103,7 @@ impl<const KEY_SZ: usize> Node<KEY_SZ> {
             }
         }
 
-        self.persist_node::<C, S>(key, storage)
+        Ok(())
     }
 
     pub fn persist_block<C, S>(
@@ -109,20 +111,20 @@ impl<const KEY_SZ: usize> Node<KEY_SZ> {
         block: &BlockId,
         mut key: Key<KEY_SZ>,
         storage: &mut S,
-    ) -> Result<(), Error<S::Error>>
+    ) -> Result<bool, Error<S::Error>>
     where
         C: Crypter,
         S: Storage<Id = u64>,
     {
         let mut node = self;
         loop {
-            node.persist::<C, S>(key, storage)?;
+            node.persist_node::<C, S>(key, storage)?;
 
             let idx = node.find_index(block);
             if idx < node.len() && node.keys[idx] == *block {
-                return Ok(());
+                return Ok(true);
             } else if node.is_leaf() {
-                return Ok(());
+                return Ok(false);
             } else {
                 key = node.children_keys[idx];
                 node = node.access_child::<C, S>(idx, storage)?;
