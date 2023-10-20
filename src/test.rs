@@ -6,7 +6,7 @@ use std::{collections::HashMap, fs};
 fn simple() -> Result<()> {
     let mut rng = ThreadRng::default();
     let mut map = HashMap::new();
-    let mut tree = BKeyTree::new("/tmp/bkeytreedir-simple", utils::generate_key(&mut rng))?;
+    let mut tree = BKeyTree::new("/tmp/bkeytreedir-simple")?;
 
     for block in 0..1000 {
         let key = utils::generate_key(&mut rng);
@@ -30,7 +30,7 @@ fn simple() -> Result<()> {
 fn reloading() -> Result<()> {
     let mut rng = ThreadRng::default();
     let mut map = HashMap::new();
-    let mut tree = BKeyTree::new("/tmp/bkeytreedir-reload", utils::generate_key(&mut rng))?;
+    let mut tree = BKeyTree::new("/tmp/bkeytreedir-reload")?;
 
     for block in 0..1000 {
         let key = utils::generate_key(&mut rng);
@@ -39,8 +39,11 @@ fn reloading() -> Result<()> {
         assert_eq!(tree.len(), block as usize + 1);
     }
 
-    let (id, key) = tree.persist()?;
-    let mut tree = BKeyTree::reload(id, "/tmp/bkeytreedir-reload", key)?;
+    let key = utils::generate_key(&mut rng);
+    let root_id = tree.root_id();
+    tree.persist(key)?;
+
+    let mut tree = BKeyTree::reload(root_id, "/tmp/bkeytreedir-reload", key)?;
 
     for block in 0..1000 {
         let key = map.remove(&block).unwrap();
@@ -54,11 +57,7 @@ fn reloading() -> Result<()> {
 
 #[test]
 fn correctness() -> Result<()> {
-    let mut rng = ThreadRng::default();
-    let mut tree = BKeyTree::new(
-        "/tmp/bkeytreedir-correctness",
-        utils::generate_key(&mut rng),
-    )?;
+    let mut tree = BKeyTree::new("/tmp/bkeytreedir-correctness")?;
 
     // We'll check that we can re-derive this after commit.
     let key4 = tree.derive(4)?;
@@ -74,6 +73,8 @@ fn correctness() -> Result<()> {
     let key5_rederived = tree.derive(5)?;
     assert_eq!(key4, key4_rederived);
     assert_ne!(key5, key5_rederived);
+
+    let _ = fs::remove_dir_all("/tmp/bkeytreedir-correctness");
 
     Ok(())
 }

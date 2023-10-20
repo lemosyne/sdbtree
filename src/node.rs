@@ -87,12 +87,11 @@ impl<const KEY_SZ: usize> Node<KEY_SZ> {
         })
     }
 
-    pub fn persist<C, S>(&self, key: Key<KEY_SZ>, storage: &mut S) -> Result<u64, Error<S::Error>>
+    pub fn persist<C, S>(&self, key: Key<KEY_SZ>, storage: &mut S) -> Result<(), Error<S::Error>>
     where
         C: Crypter,
         S: Storage<Id = u64>,
     {
-        // Recursively persist children.
         for (i, child) in self.children.iter().enumerate() {
             match child {
                 Child::Loaded(node) => {
@@ -102,6 +101,44 @@ impl<const KEY_SZ: usize> Node<KEY_SZ> {
             }
         }
 
+        self.persist_node::<C, S>(key, storage)
+    }
+
+    pub fn persist_block<C, S>(
+        &mut self,
+        block: &BlockId,
+        mut key: Key<KEY_SZ>,
+        storage: &mut S,
+    ) -> Result<(), Error<S::Error>>
+    where
+        C: Crypter,
+        S: Storage<Id = u64>,
+    {
+        let mut node = self;
+        loop {
+            node.persist::<C, S>(key, storage)?;
+
+            let idx = node.find_index(block);
+            if idx < node.len() && node.keys[idx] == *block {
+                return Ok(());
+            } else if node.is_leaf() {
+                return Ok(());
+            } else {
+                key = node.children_keys[idx];
+                node = node.access_child::<C, S>(idx, storage)?;
+            }
+        }
+    }
+
+    pub fn persist_node<C, S>(
+        &self,
+        key: Key<KEY_SZ>,
+        storage: &mut S,
+    ) -> Result<(), Error<S::Error>>
+    where
+        C: Crypter,
+        S: Storage<Id = u64>,
+    {
         // Serialize the keys and values.
         // This should really be done in one shot.
         let keys_raw = utils::serialize_ids(&self.keys);
@@ -129,7 +166,7 @@ impl<const KEY_SZ: usize> Node<KEY_SZ> {
         utils::write_length_prefixed_bytes::<C, S, KEY_SZ>(&mut writer, &children_raw, key)?;
         utils::write_length_prefixed_bytes::<C, S, KEY_SZ>(&mut writer, &children_keys_raw, key)?;
 
-        Ok(self.id)
+        Ok(())
     }
 
     fn find_index(&self, k: &BlockId) -> usize {
@@ -188,30 +225,6 @@ impl<const KEY_SZ: usize> Node<KEY_SZ> {
             } else if node.is_leaf() {
                 return Ok(None);
             } else {
-                node = node.access_child::<C, S>(idx, storage)?;
-            }
-        }
-    }
-
-    pub fn get_node_for_persist<C, S>(
-        &mut self,
-        k: &BlockId,
-        mut key: Key<KEY_SZ>,
-        storage: &mut S,
-    ) -> Result<Option<(Key<KEY_SZ>, &Node<KEY_SZ>)>, Error<S::Error>>
-    where
-        C: Crypter,
-        S: Storage<Id = u64>,
-    {
-        let mut node = self;
-        loop {
-            let idx = node.find_index(k);
-            if idx < node.len() && node.keys[idx] == *k {
-                return Ok(Some((key, node)));
-            } else if node.is_leaf() {
-                return Ok(None);
-            } else {
-                key = node.children_keys[idx];
                 node = node.access_child::<C, S>(idx, storage)?;
             }
         }

@@ -43,7 +43,6 @@ pub struct BKeyTree<
     updated: HashSet<NodeId>,
     updated_blocks: HashSet<BlockId>,
     in_flight_blocks: HashMap<BlockId, Key<KEY_SZ>>,
-    key: Key<KEY_SZ>,
     root: Node<KEY_SZ>,
     storage: S,
     rng: R,
@@ -51,11 +50,8 @@ pub struct BKeyTree<
 }
 
 impl BKeyTree<ThreadRng, DirectoryStorage, Aes256Ctr, AES256CTR_KEY_SZ> {
-    pub fn new(
-        path: impl AsRef<str>,
-        key: Key<AES256CTR_KEY_SZ>,
-    ) -> Result<Self, Error<dir::Error>> {
-        Self::with_degree(path, key, DEFAULT_DEGREE)
+    pub fn new(path: impl AsRef<str>) -> Result<Self, Error<dir::Error>> {
+        Self::with_degree(path, DEFAULT_DEGREE)
     }
 
     pub fn reload(
@@ -66,12 +62,8 @@ impl BKeyTree<ThreadRng, DirectoryStorage, Aes256Ctr, AES256CTR_KEY_SZ> {
         Self::reload_with_storage(root_id, DirectoryStorage::new(path.as_ref())?, key)
     }
 
-    pub fn with_degree(
-        path: impl AsRef<str>,
-        key: Key<AES256CTR_KEY_SZ>,
-        degree: usize,
-    ) -> Result<Self, Error<dir::Error>> {
-        Self::with_storage_and_degree(DirectoryStorage::new(path.as_ref())?, key, degree)
+    pub fn with_degree(path: impl AsRef<str>, degree: usize) -> Result<Self, Error<dir::Error>> {
+        Self::with_storage_and_degree(DirectoryStorage::new(path.as_ref())?, degree)
     }
 }
 
@@ -81,22 +73,17 @@ where
     S: Storage<Id = u64>,
     C: Crypter,
 {
-    pub fn with_storage(storage: S, key: Key<KEY_SZ>) -> Result<Self, Error<S::Error>> {
-        Self::with_storage_and_degree(storage, key, DEFAULT_DEGREE)
+    pub fn with_storage(storage: S) -> Result<Self, Error<S::Error>> {
+        Self::with_storage_and_degree(storage, DEFAULT_DEGREE)
     }
 
-    pub fn with_storage_and_degree(
-        mut storage: S,
-        key: Key<KEY_SZ>,
-        degree: usize,
-    ) -> Result<Self, Error<S::Error>> {
+    pub fn with_storage_and_degree(mut storage: S, degree: usize) -> Result<Self, Error<S::Error>> {
         Ok(Self {
             len: 0,
             degree,
             updated: HashSet::new(),
             updated_blocks: HashSet::new(),
             in_flight_blocks: HashMap::new(),
-            key,
             root: Node::new(storage.alloc_id()?),
             storage,
             rng: R::default(),
@@ -133,7 +120,6 @@ where
             updated: HashSet::new(),
             updated_blocks: HashSet::new(),
             in_flight_blocks: HashMap::new(),
-            key,
             root,
             rng: R::default(),
             storage,
@@ -167,7 +153,6 @@ where
         };
 
         // Update state after the fallible operations.
-        self.key = key;
         self.root = root;
         self.len = len;
         self.degree = degree;
@@ -175,9 +160,9 @@ where
         Ok(())
     }
 
-    pub fn persist(&mut self) -> Result<(NodeId, Key<KEY_SZ>), Error<S::Error>> {
+    pub fn persist(&mut self, key: Key<KEY_SZ>) -> Result<(), Error<S::Error>> {
         // Persist the root node.
-        self.root.persist::<C, S>(self.key, &mut self.storage)?;
+        self.root.persist::<C, S>(key, &mut self.storage)?;
 
         // Persist length and degree at the end.
         let mut writer = self.storage.write_handle(&self.root.id)?;
@@ -189,20 +174,16 @@ where
             .write_all(&(self.degree as u64).to_le_bytes())
             .map_err(|_| Error::Write)?;
 
-        // Return the root's ID and key.
-        Ok((self.root.id, self.key))
+        Ok(())
     }
 
-    pub fn persist_block(&mut self, k: &BlockId) -> Result<bool, Error<S::Error>> {
-        if let Some((key, node)) =
-            self.root
-                .get_node_for_persist::<C, S>(k, self.key, &mut self.storage)?
-        {
-            node.persist::<C, S>(key, &mut self.storage)?;
-            Ok(true)
-        } else {
-            Ok(false)
-        }
+    pub fn persist_block(
+        &mut self,
+        block: &BlockId,
+        key: Key<KEY_SZ>,
+    ) -> Result<(), Error<S::Error>> {
+        self.root
+            .persist_block::<C, S>(block, key, &mut self.storage)
     }
 
     pub fn len(&self) -> usize {
