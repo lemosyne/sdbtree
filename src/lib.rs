@@ -7,10 +7,7 @@ mod utils;
 pub use storage; // For re-export
 
 use crypter::{openssl::Aes256Ctr, Crypter};
-use embedded_io::{
-    blocking::{Read, Seek, Write},
-    SeekFrom,
-};
+use embedded_io::{blocking::Seek, SeekFrom};
 use error::Error;
 use kms::KeyManagementScheme;
 use node::{Child, Node};
@@ -44,9 +41,19 @@ pub struct BKeyTree<
     updated_blocks: HashSet<BlockId>,
     in_flight_blocks: HashMap<BlockId, Key<KEY_SZ>>,
     root: Node<KEY_SZ>,
+    meta_id: u64,
     storage: S,
     rng: R,
     pd: PhantomData<C>,
+}
+
+struct BKeyTreeMeta<const KEY_SZ: usize = AES256CTR_KEY_SZ> {
+    meta_id: u64,
+    len: usize,
+    degree: usize,
+    updated: HashSet<NodeId>,
+    updated_blocks: HashSet<BlockId>,
+    in_flight_blocks: HashMap<BlockId, Key<KEY_SZ>>,
 }
 
 impl BKeyTree<ThreadRng, DirectoryStorage, Aes256Ctr, AES256CTR_KEY_SZ> {
@@ -85,6 +92,7 @@ where
             updated_blocks: HashSet::new(),
             in_flight_blocks: HashMap::new(),
             root: Node::new(storage.alloc_id()?),
+            meta_id: storage.alloc_id()?,
             storage,
             rng: R::default(),
             pd: PhantomData,
@@ -99,63 +107,103 @@ where
         // Load the root node.
         let root = Node::load::<C, S>(id, key, &mut storage)?;
 
-        // To load with the extra metadata at the end.
-        let mut len_raw = [0; mem::size_of::<u64>()];
-        let mut degree_raw = [0; mem::size_of::<u64>()];
-
-        {
-            let mut reader = storage.read_handle(&root.id)?;
-            reader
-                .seek(SeekFrom::End(-2 * mem::size_of::<u64>() as i64))
-                .map_err(|_| Error::Seek)?;
-            reader.read_exact(&mut len_raw).map_err(|_| Error::Read)?;
-            reader
-                .read_exact(&mut degree_raw)
-                .map_err(|_| Error::Read)?;
-        }
+        // Load the metadata.
+        let meta = Self::load_meta(root.id, &mut storage)?;
 
         Ok(Self {
-            len: u64::from_le_bytes(len_raw) as usize,
-            degree: u64::from_le_bytes(degree_raw) as usize,
-            updated: HashSet::new(),
-            updated_blocks: HashSet::new(),
-            in_flight_blocks: HashMap::new(),
+            len: meta.len,
+            degree: meta.degree,
+            updated: meta.updated,
+            updated_blocks: meta.updated_blocks,
+            in_flight_blocks: meta.in_flight_blocks,
             root,
+            meta_id: meta.meta_id,
             rng: R::default(),
             storage,
             pd: PhantomData,
         })
     }
 
+    fn load_meta(root_id: u64, storage: &mut S) -> Result<BKeyTreeMeta<KEY_SZ>, Error<S::Error>>
+    where
+        S: Storage<Id = u64>,
+    {
+        let meta_id = {
+            let mut reader = storage.read_handle(&root_id)?;
+            reader
+                .seek(SeekFrom::End(-1 * mem::size_of::<u64>() as i64))
+                .map_err(|_| Error::Seek)?;
+            utils::read_u64::<S>(&mut reader)?
+        };
+
+        let mut reader = storage.read_handle(&meta_id)?;
+
+        let len = utils::read_u64::<S>(&mut reader)?;
+        let degree = utils::read_u64::<S>(&mut reader)?;
+
+        let updated_raw = utils::read_length_prefixed_bytes_clear::<S>(&mut reader)?;
+        let updated = bincode::deserialize(&updated_raw).map_err(|_| Error::Deserialization)?;
+
+        let updated_blocks_raw = utils::read_length_prefixed_bytes_clear::<S>(&mut reader)?;
+        let updated_blocks =
+            bincode::deserialize(&updated_blocks_raw).map_err(|_| Error::Deserialization)?;
+
+        let in_flight_blocks_raw = utils::read_length_prefixed_bytes_clear::<S>(&mut reader)?;
+        let in_flight_blocks = utils::deserialize_keys_map::<KEY_SZ>(&in_flight_blocks_raw);
+
+        Ok(BKeyTreeMeta {
+            meta_id,
+            len: len as usize,
+            degree: degree as usize,
+            updated,
+            updated_blocks,
+            in_flight_blocks,
+        })
+    }
+
+    fn persist_meta(&mut self) -> Result<(), Error<S::Error>>
+    where
+        S: Storage<Id = u64>,
+    {
+        {
+            let mut writer = self.storage.write_handle(&self.root.id)?;
+            writer.seek(SeekFrom::End(0)).map_err(|_| Error::Seek)?;
+            utils::write_u64::<S>(&mut writer, self.meta_id)?;
+        }
+
+        let mut writer = self.storage.write_handle(&self.meta_id)?;
+
+        utils::write_u64::<S>(&mut writer, self.len as u64)?;
+        utils::write_u64::<S>(&mut writer, self.degree as u64)?;
+
+        let updated_raw = bincode::serialize(&self.updated).map_err(|_| Error::Serialization)?;
+        utils::write_length_prefixed_bytes_clear::<S>(&mut writer, &updated_raw)?;
+
+        let updated_blocks_raw =
+            bincode::serialize(&self.updated_blocks).map_err(|_| Error::Serialization)?;
+        utils::write_length_prefixed_bytes_clear::<S>(&mut writer, &updated_blocks_raw)?;
+
+        let in_flight_blocks_raw = utils::serialize_keys_map(&self.in_flight_blocks);
+        utils::write_length_prefixed_bytes_clear::<S>(&mut writer, &in_flight_blocks_raw)?;
+
+        Ok(())
+    }
+
     pub fn load(&mut self, id: NodeId, key: Key<KEY_SZ>) -> Result<(), Error<S::Error>> {
         // Load the root node.
         let root = Node::load::<C, S>(id, key, &mut self.storage)?;
 
-        // Load length and degree from the end.
-        let (len, degree) = {
-            let mut len_raw = [0; mem::size_of::<u64>()];
-            let mut degree_raw = [0; mem::size_of::<u64>()];
-
-            let mut reader = self.storage.read_handle(&root.id)?;
-
-            reader
-                .seek(SeekFrom::End(-2 * mem::size_of::<u64>() as i64))
-                .map_err(|_| Error::Seek)?;
-            reader.read_exact(&mut len_raw).map_err(|_| Error::Read)?;
-            reader
-                .read_exact(&mut degree_raw)
-                .map_err(|_| Error::Read)?;
-
-            let len = u64::from_le_bytes(len_raw) as usize;
-            let degree = u64::from_le_bytes(len_raw) as usize;
-
-            (len, degree)
-        };
+        // Load the metadata.
+        let meta = Self::load_meta(root.id, &mut self.storage)?;
 
         // Update state after the fallible operations.
         self.root = root;
-        self.len = len;
-        self.degree = degree;
+        self.meta_id = meta.meta_id;
+        self.len = meta.len;
+        self.degree = meta.degree;
+        self.updated = meta.updated;
+        self.updated_blocks = meta.updated_blocks;
+        self.in_flight_blocks = meta.in_flight_blocks;
 
         Ok(())
     }
@@ -164,15 +212,8 @@ where
         // Persist the root node.
         self.root.persist::<C, S>(key, &mut self.storage)?;
 
-        // Persist length and degree at the end.
-        let mut writer = self.storage.write_handle(&self.root.id)?;
-        writer.seek(SeekFrom::End(0)).map_err(|_| Error::Seek)?;
-        writer
-            .write_all(&(self.len as u64).to_le_bytes())
-            .map_err(|_| Error::Write)?;
-        writer
-            .write_all(&(self.degree as u64).to_le_bytes())
-            .map_err(|_| Error::Write)?;
+        // Persist the metadata.
+        self.persist_meta()?;
 
         Ok(())
     }
@@ -192,16 +233,9 @@ where
             .root
             .persist_block::<C, S>(block, key, &mut self.storage)?;
 
-        // Persist length and degree at the end if we persisted the block.
+        // Persist the metadata if we persisted the block.
         if res {
-            let mut writer = self.storage.write_handle(&self.root.id)?;
-            writer.seek(SeekFrom::End(0)).map_err(|_| Error::Seek)?;
-            writer
-                .write_all(&(self.len as u64).to_le_bytes())
-                .map_err(|_| Error::Write)?;
-            writer
-                .write_all(&(self.degree as u64).to_le_bytes())
-                .map_err(|_| Error::Write)?;
+            self.persist_meta()?;
         }
 
         Ok(res)
