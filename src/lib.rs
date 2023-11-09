@@ -6,7 +6,7 @@ mod utils;
 
 pub use storage; // For re-export
 
-use crypter::{openssl::Aes256Ctr, Crypter};
+use crypter::{aes::Aes256Ctr, Crypter};
 use embedded_io::{blocking::Seek, SeekFrom};
 use error::Error;
 use kms::KeyManagementScheme;
@@ -44,6 +44,7 @@ pub struct BKeyTree<
     meta_id: u64,
     storage: S,
     rng: R,
+    cached_keys: HashMap<BlockId, Key<KEY_SZ>>,
     pd: PhantomData<C>,
 }
 
@@ -95,6 +96,7 @@ where
             meta_id: storage.alloc_id()?,
             storage,
             rng: R::default(),
+            cached_keys: HashMap::new(),
             pd: PhantomData,
         })
     }
@@ -120,6 +122,7 @@ where
             meta_id: meta.meta_id,
             rng: R::default(),
             storage,
+            cached_keys: HashMap::new(),
             pd: PhantomData,
         })
     }
@@ -424,6 +427,10 @@ where
     type Error = Error<S::Error>;
 
     fn derive(&mut self, block_id: Self::KeyId) -> Result<Self::Key, Self::Error> {
+        if let Some(key) = self.cached_keys.get(&block_id) {
+            return Ok(*key);
+        }
+
         if let Some(key) = self.get(&block_id)? {
             return Ok(*key);
         }
@@ -434,6 +441,7 @@ where
 
         let key = self.generate_key();
         self.in_flight_blocks.insert(block_id, key);
+        self.cached_keys.insert(block_id, key);
 
         Ok(key)
     }
@@ -445,7 +453,10 @@ where
     }
 
     // TODO: Fix in key management trait that commit can be fallible.
-    fn commit(&mut self) -> Vec<Self::KeyId> {
+    fn commit(
+        &mut self,
+        _rng: impl RngCore + CryptoRng,
+    ) -> Result<Vec<(Self::KeyId, Self::Key)>, Self::Error> {
         // Add any in-flight blocks that haven't been updated.
         let inflight_blocks = self
             .in_flight_blocks
@@ -454,7 +465,14 @@ where
             .collect::<Vec<_>>();
 
         for (block, key) in inflight_blocks.into_iter() {
-            self.insert_for_update(block, key).unwrap();
+            self.insert_for_update(block, key)?;
+        }
+
+        // Build our vector of blocks and pre-commit keys.
+        let mut res = vec![];
+        for block in self.updated_blocks.clone() {
+            let key = self.derive(block)?;
+            res.push((block, key));
         }
 
         // This will commit our changes, changing keys as necesssary to updated nodes as blocks.
@@ -470,6 +488,9 @@ where
         // Clear out our cached updates.
         self.updated.clear();
         self.in_flight_blocks.clear();
-        self.updated_blocks.drain().collect()
+        self.updated_blocks.clear();
+        self.cached_keys.clear();
+
+        Ok(res)
     }
 }

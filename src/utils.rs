@@ -138,7 +138,12 @@ where
     let len = read_u64::<S>(reader)?;
     let mut bytes = vec![0; len as usize];
     reader.read_exact(&mut bytes).map_err(|_| Error::Read)?;
-    Ok(C::onetime_decrypt(&key, &bytes).map_err(|_| ()).unwrap())
+
+    C::onetime_decrypt(&key, &mut bytes)
+        .map_err(|_| ())
+        .unwrap();
+
+    Ok(bytes)
 }
 
 pub fn write_length_prefixed_bytes_clear<S>(
@@ -161,11 +166,15 @@ where
     C: Crypter,
     S: Storage,
 {
+    let mut bytes = bytes.to_vec();
+
     writer
         .write_all(&(bytes.len() as u64).to_le_bytes())
         .map_err(|_| Error::Write)?;
 
-    let bytes = C::onetime_encrypt(&key, bytes).map_err(|_| ()).unwrap();
+    C::onetime_encrypt(&key, &mut bytes)
+        .map_err(|_| ())
+        .unwrap();
 
     Ok(writer.write_all(&bytes).map_err(|_| Error::Write)?)
 }
