@@ -60,13 +60,13 @@ impl<const KEY_SZ: usize> Node<KEY_SZ> {
         self.children.is_empty()
     }
 
-    pub fn load<C, S>(id: u64, key: Key<KEY_SZ>, storage: &mut S) -> Result<Self, Error<S::Error>>
+    pub fn load<C, S>(id: u64, key: Key<KEY_SZ>, storage: &mut S) -> Result<Self, Error>
     where
         C: Crypter,
         S: Storage<Id = u64>,
     {
         // Acquire a read handle.
-        let mut reader = storage.read_handle(&id)?;
+        let mut reader = storage.read_handle(&id).map_err(|_| Error::Storage)?;
 
         // Read the fields, each of which is serialized as a length-prefixed array of bytes.
         let keys_raw = utils::read_length_prefixed_bytes::<C, S, KEY_SZ>(&mut reader, key)?;
@@ -87,7 +87,7 @@ impl<const KEY_SZ: usize> Node<KEY_SZ> {
         })
     }
 
-    pub fn persist<C, S>(&self, key: Key<KEY_SZ>, storage: &mut S) -> Result<(), Error<S::Error>>
+    pub fn persist<C, S>(&self, key: Key<KEY_SZ>, storage: &mut S) -> Result<(), Error>
     where
         C: Crypter,
         S: Storage<Id = u64>,
@@ -111,7 +111,7 @@ impl<const KEY_SZ: usize> Node<KEY_SZ> {
         block: &BlockId,
         mut key: Key<KEY_SZ>,
         storage: &mut S,
-    ) -> Result<bool, Error<S::Error>>
+    ) -> Result<bool, Error>
     where
         C: Crypter,
         S: Storage<Id = u64>,
@@ -132,11 +132,7 @@ impl<const KEY_SZ: usize> Node<KEY_SZ> {
         }
     }
 
-    pub fn persist_node<C, S>(
-        &self,
-        key: Key<KEY_SZ>,
-        storage: &mut S,
-    ) -> Result<(), Error<S::Error>>
+    pub fn persist_node<C, S>(&self, key: Key<KEY_SZ>, storage: &mut S) -> Result<(), Error>
     where
         C: Crypter,
         S: Storage<Id = u64>,
@@ -160,7 +156,7 @@ impl<const KEY_SZ: usize> Node<KEY_SZ> {
         );
 
         // Acquire a write handle.
-        let mut writer = storage.write_handle(&self.id)?;
+        let mut writer = storage.write_handle(&self.id).map_err(|_| Error::Storage)?;
 
         // Write each of the fields as a length-prefixed array of bytes.
         utils::write_length_prefixed_bytes::<C, S, KEY_SZ>(&mut writer, &keys_raw, key)?;
@@ -195,7 +191,7 @@ impl<const KEY_SZ: usize> Node<KEY_SZ> {
         &mut self,
         idx: usize,
         storage: &mut S,
-    ) -> Result<&mut Node<KEY_SZ>, Error<S::Error>>
+    ) -> Result<&mut Node<KEY_SZ>, Error>
     where
         C: Crypter,
         S: Storage<Id = u64>,
@@ -214,7 +210,7 @@ impl<const KEY_SZ: usize> Node<KEY_SZ> {
         &mut self,
         k: &BlockId,
         storage: &mut S,
-    ) -> Result<Option<(usize, &Node<KEY_SZ>)>, Error<S::Error>>
+    ) -> Result<Option<(usize, &Node<KEY_SZ>)>, Error>
     where
         C: Crypter,
         S: Storage<Id = u64>,
@@ -236,7 +232,7 @@ impl<const KEY_SZ: usize> Node<KEY_SZ> {
         &mut self,
         k: &BlockId,
         storage: &mut S,
-    ) -> Result<Option<(usize, &mut Node<KEY_SZ>)>, Error<S::Error>>
+    ) -> Result<Option<(usize, &mut Node<KEY_SZ>)>, Error>
     where
         C: Crypter,
         S: Storage<Id = u64>,
@@ -262,7 +258,7 @@ impl<const KEY_SZ: usize> Node<KEY_SZ> {
         rng: &mut R,
         updated: &mut HashSet<NodeId>,
         should_update: bool,
-    ) -> Result<(), Error<S::Error>>
+    ) -> Result<(), Error>
     where
         R: RngCore + CryptoRng,
         S: Storage<Id = u64>,
@@ -271,7 +267,7 @@ impl<const KEY_SZ: usize> Node<KEY_SZ> {
         // assert!(self.children[idx].is_full(degree));
 
         let left = self.children[idx].as_option_mut().unwrap();
-        let mut right = Self::new(storage.alloc_id()?);
+        let mut right = Self::new(storage.alloc_id().map_err(|_| Error::Storage)?);
         let right_key = utils::generate_key(rng);
 
         // Move the largest keys and values from the left to the right.
@@ -315,7 +311,7 @@ impl<const KEY_SZ: usize> Node<KEY_SZ> {
         rng: &mut R,
         updated: &mut HashSet<NodeId>,
         should_update: bool,
-    ) -> Result<Option<Key<KEY_SZ>>, Error<S::Error>>
+    ) -> Result<Option<Key<KEY_SZ>>, Error>
     where
         C: Crypter,
         R: RngCore + CryptoRng,
@@ -360,7 +356,7 @@ impl<const KEY_SZ: usize> Node<KEY_SZ> {
         }
     }
 
-    pub fn min_key<C, S>(&mut self, storage: &mut S) -> Result<&BlockId, Error<S::Error>>
+    pub fn min_key<C, S>(&mut self, storage: &mut S) -> Result<&BlockId, Error>
     where
         C: Crypter,
         S: Storage<Id = u64>,
@@ -374,7 +370,7 @@ impl<const KEY_SZ: usize> Node<KEY_SZ> {
         Ok(node.keys.first().unwrap())
     }
 
-    pub fn max_key<C, S>(&mut self, storage: &mut S) -> Result<&BlockId, Error<S::Error>>
+    pub fn max_key<C, S>(&mut self, storage: &mut S) -> Result<&BlockId, Error>
     where
         C: Crypter,
         S: Storage<Id = u64>,
@@ -400,7 +396,7 @@ impl<const KEY_SZ: usize> Node<KEY_SZ> {
         storage: &mut S,
         updated: &mut HashSet<NodeId>,
         should_update: bool,
-    ) -> Result<Option<(BlockId, Key<KEY_SZ>)>, Error<S::Error>>
+    ) -> Result<Option<(BlockId, Key<KEY_SZ>)>, Error>
     where
         C: Crypter,
         S: Storage<Id = u64>,
@@ -496,7 +492,7 @@ impl<const KEY_SZ: usize> Node<KEY_SZ> {
 
                 // Deallocate the successor.
                 // This is the only case in which a node completely disappears.
-                storage.dealloc_id(succ.id)?;
+                storage.dealloc_id(succ.id).map_err(|_| Error::Storage)?;
 
                 if should_update {
                     // Update the nodes that were modified.
@@ -693,7 +689,7 @@ impl<const KEY_SZ: usize> Node<KEY_SZ> {
         )
     }
 
-    pub fn clear<C, S>(&mut self, storage: &mut S) -> Result<(), Error<S::Error>>
+    pub fn clear<C, S>(&mut self, storage: &mut S) -> Result<(), Error>
     where
         C: Crypter,
         S: Storage<Id = u64>,
@@ -717,7 +713,7 @@ impl<const KEY_SZ: usize> Node<KEY_SZ> {
         rng: &mut R,
         updated: &HashSet<NodeId>,
         updated_blocks: &HashSet<BlockId>,
-    ) -> Result<(), Error<S::Error>>
+    ) -> Result<(), Error>
     where
         C: Crypter,
         R: RngCore + CryptoRng,

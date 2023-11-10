@@ -97,7 +97,7 @@ pub fn deserialize_keys_map<const KEY_SZ: usize>(keys_raw: &[u8]) -> HashMap<u64
     keys
 }
 
-pub fn read_u64<S>(reader: &mut S::ReadHandle<'_>) -> Result<u64, Error<S::Error>>
+pub fn read_u64<S>(reader: &mut S::ReadHandle<'_>) -> Result<u64, Error>
 where
     S: Storage,
 {
@@ -106,7 +106,7 @@ where
     Ok(u64::from_le_bytes(raw))
 }
 
-pub fn write_u64<S>(writer: &mut S::WriteHandle<'_>, val: u64) -> Result<(), Error<S::Error>>
+pub fn write_u64<S>(writer: &mut S::WriteHandle<'_>, val: u64) -> Result<(), Error>
 where
     S: Storage,
 {
@@ -115,9 +115,7 @@ where
     Ok(())
 }
 
-pub fn read_length_prefixed_bytes_clear<S>(
-    reader: &mut S::ReadHandle<'_>,
-) -> Result<Vec<u8>, Error<S::Error>>
+pub fn read_length_prefixed_bytes_clear<S>(reader: &mut S::ReadHandle<'_>) -> Result<Vec<u8>, Error>
 where
     S: Storage,
 {
@@ -130,7 +128,7 @@ where
 pub fn read_length_prefixed_bytes<C, S, const KEY_SZ: usize>(
     reader: &mut S::ReadHandle<'_>,
     key: Key<KEY_SZ>,
-) -> Result<Vec<u8>, Error<S::Error>>
+) -> Result<Vec<u8>, Error>
 where
     C: Crypter,
     S: Storage,
@@ -149,7 +147,7 @@ where
 pub fn write_length_prefixed_bytes_clear<S>(
     writer: &mut S::WriteHandle<'_>,
     bytes: &[u8],
-) -> Result<(), Error<S::Error>>
+) -> Result<(), Error>
 where
     S: Storage,
 {
@@ -161,7 +159,7 @@ pub fn write_length_prefixed_bytes<C, S, const KEY_SZ: usize>(
     writer: &mut S::WriteHandle<'_>,
     bytes: &[u8],
     key: Key<KEY_SZ>,
-) -> Result<(), Error<S::Error>>
+) -> Result<(), Error>
 where
     C: Crypter,
     S: Storage,

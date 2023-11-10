@@ -1,7 +1,7 @@
 use thiserror::Error;
 
 #[derive(Debug, Error)]
-pub enum Error<E> {
+pub enum Error {
     #[error("serialization error")]
     Serialization,
 
@@ -23,11 +23,11 @@ pub enum Error<E> {
     #[error("decryption error")]
     Decrypt,
 
-    #[error(transparent)]
-    Storage(#[from] E),
+    #[error("storage error")]
+    Storage,
 
     #[error("unknown error")]
     Unknown,
 }
 
-pub type Result<T, E> = std::result::Result<T, Error<E>>;
+pub type Result<T> = std::result::Result<T, Error>;

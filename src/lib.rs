@@ -17,10 +17,7 @@ use std::{
     marker::PhantomData,
     mem,
 };
-use storage::{
-    dir::{self, DirectoryStorage},
-    Storage,
-};
+use storage::{dir::DirectoryStorage, Storage};
 
 const DEFAULT_DEGREE: usize = 2;
 const AES256CTR_KEY_SZ: usize = 32;
@@ -58,7 +55,7 @@ struct BKeyTreeMeta<const KEY_SZ: usize = AES256CTR_KEY_SZ> {
 }
 
 impl BKeyTree<ThreadRng, DirectoryStorage, Aes256Ctr, AES256CTR_KEY_SZ> {
-    pub fn new(path: impl AsRef<str>) -> Result<Self, Error<dir::Error>> {
+    pub fn new(path: impl AsRef<str>) -> Result<Self, Error> {
         Self::with_degree(path, DEFAULT_DEGREE)
     }
 
@@ -66,12 +63,19 @@ impl BKeyTree<ThreadRng, DirectoryStorage, Aes256Ctr, AES256CTR_KEY_SZ> {
         root_id: u64,
         path: impl AsRef<str>,
         key: Key<AES256CTR_KEY_SZ>,
-    ) -> Result<Self, Error<dir::Error>> {
-        Self::reload_with_storage(root_id, DirectoryStorage::new(path.as_ref())?, key)
+    ) -> Result<Self, Error> {
+        Self::reload_with_storage(
+            root_id,
+            DirectoryStorage::new(path.as_ref()).map_err(|_| Error::Storage)?,
+            key,
+        )
     }
 
-    pub fn with_degree(path: impl AsRef<str>, degree: usize) -> Result<Self, Error<dir::Error>> {
-        Self::with_storage_and_degree(DirectoryStorage::new(path.as_ref())?, degree)
+    pub fn with_degree(path: impl AsRef<str>, degree: usize) -> Result<Self, Error> {
+        Self::with_storage_and_degree(
+            DirectoryStorage::new(path.as_ref()).map_err(|_| Error::Storage)?,
+            degree,
+        )
     }
 }
 
@@ -81,19 +85,19 @@ where
     S: Storage<Id = u64>,
     C: Crypter,
 {
-    pub fn with_storage(storage: S) -> Result<Self, Error<S::Error>> {
+    pub fn with_storage(storage: S) -> Result<Self, Error> {
         Self::with_storage_and_degree(storage, DEFAULT_DEGREE)
     }
 
-    pub fn with_storage_and_degree(mut storage: S, degree: usize) -> Result<Self, Error<S::Error>> {
+    pub fn with_storage_and_degree(mut storage: S, degree: usize) -> Result<Self, Error> {
         Ok(Self {
             len: 0,
             degree,
             updated: HashSet::new(),
             updated_blocks: HashSet::new(),
             in_flight_blocks: HashMap::new(),
-            root: Node::new(storage.alloc_id()?),
-            meta_id: storage.alloc_id()?,
+            root: Node::new(storage.alloc_id().map_err(|_| Error::Storage)?),
+            meta_id: storage.alloc_id().map_err(|_| Error::Storage)?,
             storage,
             rng: R::default(),
             cached_keys: HashMap::new(),
@@ -105,7 +109,7 @@ where
         id: NodeId,
         mut storage: S,
         key: Key<KEY_SZ>,
-    ) -> Result<Self, Error<S::Error>> {
+    ) -> Result<Self, Error> {
         // Load the root node.
         let root = Node::load::<C, S>(id, key, &mut storage)?;
 
@@ -127,19 +131,19 @@ where
         })
     }
 
-    fn load_meta(root_id: u64, storage: &mut S) -> Result<BKeyTreeMeta<KEY_SZ>, Error<S::Error>>
+    fn load_meta(root_id: u64, storage: &mut S) -> Result<BKeyTreeMeta<KEY_SZ>, Error>
     where
         S: Storage<Id = u64>,
     {
         let meta_id = {
-            let mut reader = storage.read_handle(&root_id)?;
+            let mut reader = storage.read_handle(&root_id).map_err(|_| Error::Storage)?;
             reader
                 .seek(SeekFrom::End(-1 * mem::size_of::<u64>() as i64))
                 .map_err(|_| Error::Seek)?;
             utils::read_u64::<S>(&mut reader)?
         };
 
-        let mut reader = storage.read_handle(&meta_id)?;
+        let mut reader = storage.read_handle(&meta_id).map_err(|_| Error::Storage)?;
 
         let len = utils::read_u64::<S>(&mut reader)?;
         let degree = utils::read_u64::<S>(&mut reader)?;
@@ -164,17 +168,23 @@ where
         })
     }
 
-    fn persist_meta(&mut self) -> Result<(), Error<S::Error>>
+    fn persist_meta(&mut self) -> Result<(), Error>
     where
         S: Storage<Id = u64>,
     {
         {
-            let mut writer = self.storage.write_handle(&self.root.id)?;
+            let mut writer = self
+                .storage
+                .write_handle(&self.root.id)
+                .map_err(|_| Error::Storage)?;
             writer.seek(SeekFrom::End(0)).map_err(|_| Error::Seek)?;
             utils::write_u64::<S>(&mut writer, self.meta_id)?;
         }
 
-        let mut writer = self.storage.write_handle(&self.meta_id)?;
+        let mut writer = self
+            .storage
+            .write_handle(&self.meta_id)
+            .map_err(|_| Error::Storage)?;
 
         utils::write_u64::<S>(&mut writer, self.len as u64)?;
         utils::write_u64::<S>(&mut writer, self.degree as u64)?;
@@ -192,7 +202,36 @@ where
         Ok(())
     }
 
-    pub fn load(&mut self, id: NodeId, key: Key<KEY_SZ>) -> Result<(), Error<S::Error>> {
+    fn persist_meta_to<T: Storage<Id = u64>>(&mut self, storage: &mut T) -> Result<(), Error> {
+        {
+            let mut writer = storage
+                .write_handle(&self.root.id)
+                .map_err(|_| Error::Storage)?;
+            writer.seek(SeekFrom::End(0)).map_err(|_| Error::Seek)?;
+            utils::write_u64::<T>(&mut writer, self.meta_id)?;
+        }
+
+        let mut writer = storage
+            .write_handle(&self.meta_id)
+            .map_err(|_| Error::Storage)?;
+
+        utils::write_u64::<T>(&mut writer, self.len as u64)?;
+        utils::write_u64::<T>(&mut writer, self.degree as u64)?;
+
+        let updated_raw = bincode::serialize(&self.updated).map_err(|_| Error::Serialization)?;
+        utils::write_length_prefixed_bytes_clear::<T>(&mut writer, &updated_raw)?;
+
+        let updated_blocks_raw =
+            bincode::serialize(&self.updated_blocks).map_err(|_| Error::Serialization)?;
+        utils::write_length_prefixed_bytes_clear::<T>(&mut writer, &updated_blocks_raw)?;
+
+        let in_flight_blocks_raw = utils::serialize_keys_map(&self.in_flight_blocks);
+        utils::write_length_prefixed_bytes_clear::<T>(&mut writer, &in_flight_blocks_raw)?;
+
+        Ok(())
+    }
+
+    pub fn load(&mut self, id: NodeId, key: Key<KEY_SZ>) -> Result<(), Error> {
         // Load the root node.
         let root = Node::load::<C, S>(id, key, &mut self.storage)?;
 
@@ -211,9 +250,11 @@ where
         Ok(())
     }
 
-    pub fn persist(&mut self, key: Key<KEY_SZ>) -> Result<(), Error<S::Error>> {
+    pub fn persist(&mut self, key: Key<KEY_SZ>) -> Result<(), Error> {
         // Persist the root node.
-        self.root.persist::<C, S>(key, &mut self.storage)?;
+        self.root
+            .persist::<C, S>(key, &mut self.storage)
+            .map_err(|_| Error::Storage)?;
 
         // Persist the metadata.
         self.persist_meta()?;
@@ -221,11 +262,23 @@ where
         Ok(())
     }
 
-    pub fn persist_block(
+    pub fn persist_to<T: Storage<Id = u64>>(
         &mut self,
-        block: &BlockId,
         key: Key<KEY_SZ>,
-    ) -> Result<bool, Error<S::Error>> {
+        storage: &mut T,
+    ) -> Result<(), Error> {
+        // Persist the root node.
+        self.root
+            .persist::<C, T>(key, storage)
+            .map_err(|_| Error::Storage)?;
+
+        // Persist the metadata.
+        self.persist_meta_to(storage)?;
+
+        Ok(())
+    }
+
+    pub fn persist_block(&mut self, block: &BlockId, key: Key<KEY_SZ>) -> Result<bool, Error> {
         // If the block is in-flight, insert without marking nodes in the path as updated.
         if let Some(block_key) = self.in_flight_blocks.remove(block) {
             self.insert_no_update(*block, block_key)?;
@@ -244,6 +297,28 @@ where
         Ok(res)
     }
 
+    pub fn persist_block_to<T: Storage<Id = u64>>(
+        &mut self,
+        block: &BlockId,
+        key: Key<KEY_SZ>,
+        storage: &mut T,
+    ) -> Result<bool, Error> {
+        // If the block is in-flight, insert without marking nodes in the path as updated.
+        if let Some(block_key) = self.in_flight_blocks.remove(block) {
+            self.insert_no_update(*block, block_key)?;
+        }
+
+        // Persist the block, persisting any nodes along the way.
+        let res = self.root.persist_block::<C, T>(block, key, storage)?;
+
+        // Persist the metadata if we persisted the block.
+        if res {
+            self.persist_meta_to(storage)?;
+        }
+
+        Ok(res)
+    }
+
     pub fn len(&self) -> usize {
         self.len
     }
@@ -256,25 +331,25 @@ where
         self.root.id
     }
 
-    pub fn contains(&mut self, k: &BlockId) -> Result<bool, Error<S::Error>> {
+    pub fn contains(&mut self, k: &BlockId) -> Result<bool, Error> {
         Ok(self.get(k)?.is_some())
     }
 
-    pub fn get(&mut self, k: &BlockId) -> Result<Option<&Key<KEY_SZ>>, Error<S::Error>> {
+    pub fn get(&mut self, k: &BlockId) -> Result<Option<&Key<KEY_SZ>>, Error> {
         Ok(self
             .root
             .get::<C, S>(k, &mut self.storage)?
             .map(|(idx, node)| &node.vals[idx]))
     }
 
-    pub fn get_node(&mut self, k: &BlockId) -> Result<Option<&Node<KEY_SZ>>, Error<S::Error>> {
+    pub fn get_node(&mut self, k: &BlockId) -> Result<Option<&Node<KEY_SZ>>, Error> {
         Ok(self
             .root
             .get::<C, S>(k, &mut self.storage)?
             .map(|(_, node)| node))
     }
 
-    pub fn get_mut(&mut self, k: &BlockId) -> Result<Option<&mut Key<KEY_SZ>>, Error<S::Error>> {
+    pub fn get_mut(&mut self, k: &BlockId) -> Result<Option<&mut Key<KEY_SZ>>, Error> {
         Ok(self
             .root
             .get_mut::<C, S>(k, &mut self.storage)?
@@ -284,7 +359,7 @@ where
     pub fn get_key_value(
         &mut self,
         k: &BlockId,
-    ) -> Result<Option<(&BlockId, &Key<KEY_SZ>)>, Error<S::Error>> {
+    ) -> Result<Option<(&BlockId, &Key<KEY_SZ>)>, Error> {
         Ok(self
             .root
             .get::<C, S>(k, &mut self.storage)?
@@ -292,13 +367,9 @@ where
     }
 
     /// Inserts a key while marking any of the nodes touched on the way down as updated.
-    pub fn insert(
-        &mut self,
-        k: BlockId,
-        v: Key<KEY_SZ>,
-    ) -> Result<Option<Key<KEY_SZ>>, Error<S::Error>> {
+    pub fn insert(&mut self, k: BlockId, v: Key<KEY_SZ>) -> Result<Option<Key<KEY_SZ>>, Error> {
         if self.root.is_full(self.degree) {
-            let mut new_root = Node::new(self.storage.alloc_id()?);
+            let mut new_root = Node::new(self.storage.alloc_id().map_err(|_| Error::Storage)?);
 
             self.updated.insert(self.root.id);
             self.updated.insert(new_root.id);
@@ -338,9 +409,9 @@ where
         &mut self,
         k: BlockId,
         v: Key<KEY_SZ>,
-    ) -> Result<Option<Key<KEY_SZ>>, Error<S::Error>> {
+    ) -> Result<Option<Key<KEY_SZ>>, Error> {
         if self.root.is_full(self.degree) {
-            let mut new_root = Node::new(self.storage.alloc_id()?);
+            let mut new_root = Node::new(self.storage.alloc_id().map_err(|_| Error::Storage)?);
             let new_root_key = self.generate_key();
 
             mem::swap(&mut self.root, &mut new_root);
@@ -376,15 +447,12 @@ where
     }
 
     /// Removes and marks nodes as updated.
-    pub fn remove(&mut self, k: &BlockId) -> Result<Option<Key<KEY_SZ>>, Error<S::Error>> {
+    pub fn remove(&mut self, k: &BlockId) -> Result<Option<Key<KEY_SZ>>, Error> {
         Ok(self.remove_entry(k)?.map(|(_, val)| val))
     }
 
     /// Removes an entry and marks nodes as updated.
-    pub fn remove_entry(
-        &mut self,
-        k: &BlockId,
-    ) -> Result<Option<(BlockId, Key<KEY_SZ>)>, Error<S::Error>> {
+    pub fn remove_entry(&mut self, k: &BlockId) -> Result<Option<(BlockId, Key<KEY_SZ>)>, Error> {
         // We do this to make it easier to mark updated nodes when removing.
         if !self.contains(k)? {
             return Ok(None);
@@ -405,10 +473,7 @@ where
     }
 
     /// Removes without marking nodes as updated.
-    pub fn remove_no_update(
-        &mut self,
-        k: &BlockId,
-    ) -> Result<Option<Key<KEY_SZ>>, Error<S::Error>> {
+    pub fn remove_no_update(&mut self, k: &BlockId) -> Result<Option<Key<KEY_SZ>>, Error> {
         Ok(self.remove_entry_no_update(k)?.map(|(_, val)| val))
     }
 
@@ -416,7 +481,7 @@ where
     pub fn remove_entry_no_update(
         &mut self,
         k: &BlockId,
-    ) -> Result<Option<(BlockId, Key<KEY_SZ>)>, Error<S::Error>> {
+    ) -> Result<Option<(BlockId, Key<KEY_SZ>)>, Error> {
         if !self.contains(k)? {
             return Ok(None);
         }
@@ -435,10 +500,10 @@ where
         }
     }
 
-    pub fn clear(&mut self) -> Result<NodeId, Error<S::Error>> {
+    pub fn clear(&mut self) -> Result<NodeId, Error> {
         self.len = 0;
         self.root.clear::<C, S>(&mut self.storage)?;
-        self.root = Node::new(self.storage.alloc_id()?);
+        self.root = Node::new(self.storage.alloc_id().map_err(|_| Error::Storage)?);
         Ok(self.root.id)
     }
 
@@ -457,7 +522,7 @@ where
 {
     type Key = Key<KEY_SZ>;
     type KeyId = BlockId;
-    type Error = Error<S::Error>;
+    type Error = Error;
 
     fn derive(&mut self, block_id: Self::KeyId) -> Result<Self::Key, Self::Error> {
         if let Some(key) = self.cached_keys.get(&block_id) {
