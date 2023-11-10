@@ -228,7 +228,7 @@ where
     ) -> Result<bool, Error<S::Error>> {
         // If the block is in-flight, insert without marking nodes in the path as updated.
         if let Some(block_key) = self.in_flight_blocks.remove(block) {
-            self.insert(*block, block_key)?;
+            self.insert_no_update(*block, block_key)?;
         }
 
         // Persist the block, persisting any nodes along the way.
@@ -291,50 +291,8 @@ where
             .map(|(idx, node)| (&node.keys[idx], &node.vals[idx])))
     }
 
-    /// Inserts a key without marking any of the nodes touched on the way down as updated.
-    pub fn insert(
-        &mut self,
-        k: BlockId,
-        v: Key<KEY_SZ>,
-    ) -> Result<Option<Key<KEY_SZ>>, Error<S::Error>> {
-        if self.root.is_full(self.degree) {
-            let mut new_root = Node::new(self.storage.alloc_id()?);
-            let new_root_key = self.generate_key();
-
-            mem::swap(&mut self.root, &mut new_root);
-
-            self.root.children.push(Child::Loaded(new_root));
-            self.root.children_keys.push(new_root_key);
-
-            self.root.split_child(
-                0,
-                self.degree,
-                &mut self.storage,
-                false,
-                &mut self.rng,
-                &mut self.updated,
-            )?;
-        }
-
-        let res = self.root.insert_nonfull::<C, R, S>(
-            k,
-            v,
-            self.degree,
-            &mut self.storage,
-            false,
-            &mut self.rng,
-            &mut self.updated,
-        )?;
-
-        if res.is_none() {
-            self.len += 1;
-        }
-
-        Ok(res)
-    }
-
     /// Inserts a key while marking any of the nodes touched on the way down as updated.
-    pub fn insert_for_update(
+    pub fn insert(
         &mut self,
         k: BlockId,
         v: Key<KEY_SZ>,
@@ -352,9 +310,9 @@ where
                 0,
                 self.degree,
                 &mut self.storage,
-                true,
                 &mut self.rng,
                 &mut self.updated,
+                true,
             )?;
         }
 
@@ -363,9 +321,9 @@ where
             v,
             self.degree,
             &mut self.storage,
-            true,
             &mut self.rng,
             &mut self.updated,
+            true,
         )?;
 
         if res.is_none() {
@@ -375,10 +333,54 @@ where
         Ok(res)
     }
 
+    /// Inserts a key without marking any of the nodes touched on the way down as updated.
+    pub fn insert_no_update(
+        &mut self,
+        k: BlockId,
+        v: Key<KEY_SZ>,
+    ) -> Result<Option<Key<KEY_SZ>>, Error<S::Error>> {
+        if self.root.is_full(self.degree) {
+            let mut new_root = Node::new(self.storage.alloc_id()?);
+            let new_root_key = self.generate_key();
+
+            mem::swap(&mut self.root, &mut new_root);
+
+            self.root.children.push(Child::Loaded(new_root));
+            self.root.children_keys.push(new_root_key);
+
+            self.root.split_child(
+                0,
+                self.degree,
+                &mut self.storage,
+                &mut self.rng,
+                &mut self.updated,
+                false,
+            )?;
+        }
+
+        let res = self.root.insert_nonfull::<C, R, S>(
+            k,
+            v,
+            self.degree,
+            &mut self.storage,
+            &mut self.rng,
+            &mut self.updated,
+            false,
+        )?;
+
+        if res.is_none() {
+            self.len += 1;
+        }
+
+        Ok(res)
+    }
+
+    /// Removes and marks nodes as updated.
     pub fn remove(&mut self, k: &BlockId) -> Result<Option<Key<KEY_SZ>>, Error<S::Error>> {
         Ok(self.remove_entry(k)?.map(|(_, val)| val))
     }
 
+    /// Removes an entry and marks nodes as updated.
     pub fn remove_entry(
         &mut self,
         k: &BlockId,
@@ -390,7 +392,38 @@ where
 
         if let Some(entry) =
             self.root
-                .remove::<C, S>(k, self.degree, &mut self.storage, &mut self.updated)?
+                .remove::<C, S>(k, self.degree, &mut self.storage, &mut self.updated, true)?
+        {
+            if !self.root.is_leaf() && self.root.is_empty() {
+                self.root = self.root.children.pop().unwrap().as_option_owned().unwrap();
+            }
+            self.len -= 1;
+            Ok(Some(entry))
+        } else {
+            Ok(None)
+        }
+    }
+
+    /// Removes without marking nodes as updated.
+    pub fn remove_no_update(
+        &mut self,
+        k: &BlockId,
+    ) -> Result<Option<Key<KEY_SZ>>, Error<S::Error>> {
+        Ok(self.remove_entry_no_update(k)?.map(|(_, val)| val))
+    }
+
+    /// Removes an entry without marking nodes as updated.
+    pub fn remove_entry_no_update(
+        &mut self,
+        k: &BlockId,
+    ) -> Result<Option<(BlockId, Key<KEY_SZ>)>, Error<S::Error>> {
+        if !self.contains(k)? {
+            return Ok(None);
+        }
+
+        if let Some(entry) =
+            self.root
+                .remove::<C, S>(k, self.degree, &mut self.storage, &mut self.updated, false)?
         {
             if !self.root.is_leaf() && self.root.is_empty() {
                 self.root = self.root.children.pop().unwrap().as_option_owned().unwrap();
@@ -465,7 +498,7 @@ where
             .collect::<Vec<_>>();
 
         for (block, key) in inflight_blocks.into_iter() {
-            self.insert_for_update(block, key)?;
+            self.insert(block, key)?;
         }
 
         // Build our vector of blocks and pre-commit keys.

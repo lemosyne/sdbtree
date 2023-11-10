@@ -259,9 +259,9 @@ impl<const KEY_SZ: usize> Node<KEY_SZ> {
         idx: usize,
         degree: usize,
         storage: &mut S,
-        for_update: bool,
         rng: &mut R,
         updated: &mut HashSet<NodeId>,
+        should_update: bool,
     ) -> Result<(), Error<S::Error>>
     where
         R: RngCore + CryptoRng,
@@ -291,7 +291,7 @@ impl<const KEY_SZ: usize> Node<KEY_SZ> {
         }
 
         // Mark all the nodes we touched.
-        if for_update {
+        if should_update {
             updated.insert(self.id);
             updated.insert(left.id);
             updated.insert(right.id);
@@ -312,9 +312,9 @@ impl<const KEY_SZ: usize> Node<KEY_SZ> {
         v: Key<KEY_SZ>,
         degree: usize,
         storage: &mut S,
-        for_update: bool,
         rng: &mut R,
         updated: &mut HashSet<NodeId>,
+        should_update: bool,
     ) -> Result<Option<Key<KEY_SZ>>, Error<S::Error>>
     where
         C: Crypter,
@@ -330,7 +330,7 @@ impl<const KEY_SZ: usize> Node<KEY_SZ> {
 
             // This node may not actually have any changes, but is along the path to the node
             // that will be updated, so it must be added.
-            if for_update {
+            if should_update {
                 updated.insert(node.id);
             }
 
@@ -350,7 +350,7 @@ impl<const KEY_SZ: usize> Node<KEY_SZ> {
             else {
                 if node.access_child::<C, S>(idx, storage)?.is_full(degree) {
                     // Split the child and determine which child to recurse down.
-                    node.split_child(idx, degree, storage, for_update, rng, updated)?;
+                    node.split_child(idx, degree, storage, rng, updated, should_update)?;
                     if node.keys[idx] < k {
                         idx += 1;
                     }
@@ -399,13 +399,16 @@ impl<const KEY_SZ: usize> Node<KEY_SZ> {
         degree: usize,
         storage: &mut S,
         updated: &mut HashSet<NodeId>,
+        should_update: bool,
     ) -> Result<Option<(BlockId, Key<KEY_SZ>)>, Error<S::Error>>
     where
         C: Crypter,
         S: Storage<Id = u64>,
     {
-        // Update the nodes that were modified.
-        updated.insert(self.id);
+        if should_update {
+            // Update the nodes that were modified
+            updated.insert(self.id);
+        }
 
         let mut idx = self.find_index(k);
 
@@ -426,15 +429,23 @@ impl<const KEY_SZ: usize> Node<KEY_SZ> {
                 // Safety: we won't ever use the reference past this point.
                 let pred_key = pred.max_key::<C, S>(storage)? as *const _;
                 let (mut pred_key, mut pred_val) = pred
-                    .remove::<C, S>(unsafe { &*pred_key }, degree, storage, updated)?
+                    .remove::<C, S>(
+                        unsafe { &*pred_key },
+                        degree,
+                        storage,
+                        updated,
+                        should_update,
+                    )?
                     .unwrap();
 
                 // The actual replacement.
                 mem::swap(&mut self.keys[idx], &mut pred_key);
                 mem::swap(&mut self.vals[idx], &mut pred_val);
 
-                // Update the nodes that were modified.
-                updated.insert(pred.id);
+                if should_update {
+                    // Update the nodes that were modified.
+                    updated.insert(pred.id);
+                }
 
                 return Ok(Some((pred_key, pred_val)));
             } else if self.access_child::<C, S>(idx + 1, storage)?.len() >= degree {
@@ -445,15 +456,23 @@ impl<const KEY_SZ: usize> Node<KEY_SZ> {
                 // Safety: we don't ever use the reference past this point.
                 let succ_key = succ.min_key::<C, S>(storage)? as *const _;
                 let (mut succ_key, mut succ_val) = succ
-                    .remove::<C, S>(unsafe { &*succ_key }, degree, storage, updated)?
+                    .remove::<C, S>(
+                        unsafe { &*succ_key },
+                        degree,
+                        storage,
+                        updated,
+                        should_update,
+                    )?
                     .unwrap();
 
                 // The actual replacement.
                 mem::swap(&mut self.keys[idx], &mut succ_key);
                 mem::swap(&mut self.vals[idx], &mut succ_val);
 
-                // Update the nodes that were modified.
-                updated.insert(succ.id);
+                if should_update {
+                    // Update the nodes that were modified.
+                    updated.insert(succ.id);
+                }
 
                 return Ok(Some((succ_key, succ_val)));
             } else {
@@ -479,12 +498,14 @@ impl<const KEY_SZ: usize> Node<KEY_SZ> {
                 // This is the only case in which a node completely disappears.
                 storage.dealloc_id(succ.id)?;
 
-                // Update the nodes that were modified.
-                // Since the successor doesn't exist anymore, we can remove it.
-                updated.remove(&succ.id);
-                updated.insert(pred.id);
+                if should_update {
+                    // Update the nodes that were modified.
+                    // Since the successor doesn't exist anymore, we can remove it.
+                    updated.remove(&succ.id);
+                    updated.insert(pred.id);
+                }
 
-                return pred.remove::<C, S>(k, degree, storage, updated);
+                return pred.remove::<C, S>(k, degree, storage, updated, should_update);
             }
         }
 
@@ -507,8 +528,10 @@ impl<const KEY_SZ: usize> Node<KEY_SZ> {
                     mid.keys.insert(0, parent_key);
                     mid.vals.insert(0, parent_val);
 
-                    // Update the nodes that were modified.
-                    updated.insert(mid.id);
+                    if should_update {
+                        // Update the nodes that were modified.
+                        updated.insert(mid.id);
+                    }
                 }
 
                 // Move rightmost key and value in left sibling to parent.
@@ -517,8 +540,10 @@ impl<const KEY_SZ: usize> Node<KEY_SZ> {
                     let left_key = left.keys.pop().unwrap();
                     let left_val = left.vals.pop().unwrap();
 
-                    // Update the nodes that were modified.
-                    updated.insert(left.id);
+                    if should_update {
+                        // Update the nodes that were modified.
+                        updated.insert(left.id);
+                    }
 
                     self.keys.insert(idx - 1, left_key);
                     self.vals.insert(idx - 1, left_val);
@@ -548,8 +573,10 @@ impl<const KEY_SZ: usize> Node<KEY_SZ> {
                     mid.keys.push(parent_key);
                     mid.vals.push(parent_val);
 
-                    // Update the nodes that were modified.
-                    updated.insert(mid.id);
+                    if should_update {
+                        // Update the nodes that were modified.
+                        updated.insert(mid.id);
+                    }
                 }
 
                 // Move leftmost key and value in right sibling to parent.
@@ -558,8 +585,10 @@ impl<const KEY_SZ: usize> Node<KEY_SZ> {
                     let right_key = right.keys.remove(0);
                     let right_val = right.vals.remove(0);
 
-                    // Update the nodes that were modified.
-                    updated.insert(right.id);
+                    if should_update {
+                        // Update the nodes that were modified.
+                        updated.insert(right.id);
+                    }
 
                     self.keys.insert(idx, right_key);
                     self.vals.insert(idx, right_val);
@@ -589,8 +618,10 @@ impl<const KEY_SZ: usize> Node<KEY_SZ> {
                     let mut mid_children = mid.children.drain(..).collect();
                     let mut mid_children_keys = mid.children_keys.drain(..).collect();
 
-                    // Update the nodes that were modified.
-                    updated.insert(mid.id);
+                    if should_update {
+                        // Update the nodes that were modified.
+                        updated.insert(mid.id);
+                    }
 
                     let left = self.access_child::<C, S>(idx - 1, storage)?;
                     left.keys.push(parent_key);
@@ -602,8 +633,10 @@ impl<const KEY_SZ: usize> Node<KEY_SZ> {
                     left.children.append(&mut mid_children);
                     left.children_keys.append(&mut mid_children_keys);
 
-                    // Update the nodes that were modified.
-                    updated.insert(left.id);
+                    if should_update {
+                        // Update the nodes that were modified.
+                        updated.insert(left.id);
+                    }
                 }
 
                 // Remove the merged child.
@@ -626,8 +659,10 @@ impl<const KEY_SZ: usize> Node<KEY_SZ> {
                     let mut right_children = right.children.drain(..).collect();
                     let mut right_children_keys = right.children_keys.drain(..).collect();
 
-                    // Update the nodes that were modified.
-                    updated.insert(right.id);
+                    if should_update {
+                        // Update the nodes that were modified.
+                        updated.insert(right.id);
+                    }
 
                     let mid = self.access_child::<C, S>(idx, storage)?;
                     mid.keys.push(parent_key);
@@ -637,8 +672,10 @@ impl<const KEY_SZ: usize> Node<KEY_SZ> {
                     mid.children.append(&mut right_children);
                     mid.children_keys.append(&mut right_children_keys);
 
-                    // Update the nodes that were modified.
-                    updated.insert(mid.id);
+                    if should_update {
+                        // Update the nodes that were modified.
+                        updated.insert(mid.id);
+                    }
                 }
 
                 // Remove the right sibling.
@@ -647,8 +684,13 @@ impl<const KEY_SZ: usize> Node<KEY_SZ> {
             }
         }
 
-        self.access_child::<C, S>(idx, storage)?
-            .remove::<C, S>(k, degree, storage, updated)
+        self.access_child::<C, S>(idx, storage)?.remove::<C, S>(
+            k,
+            degree,
+            storage,
+            updated,
+            should_update,
+        )
     }
 
     pub fn clear<C, S>(&mut self, storage: &mut S) -> Result<(), Error<S::Error>>
