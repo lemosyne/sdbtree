@@ -370,6 +370,7 @@ where
     pub fn insert(&mut self, k: BlockId, v: Key<KEY_SZ>) -> Result<Option<Key<KEY_SZ>>, Error> {
         if self.root.is_full(self.degree) {
             let mut new_root = Node::new(self.storage.alloc_id().map_err(|_| Error::Storage)?);
+            let new_root_key = self.generate_key();
 
             self.updated.insert(self.root.id);
             self.updated.insert(new_root.id);
@@ -377,6 +378,8 @@ where
             mem::swap(&mut self.root, &mut new_root);
 
             self.root.children.push(Child::Loaded(new_root));
+            self.root.children_keys.push(new_root_key);
+
             self.root.split_child(
                 0,
                 self.degree,
@@ -550,7 +553,6 @@ where
         Ok(key)
     }
 
-    // TODO: Fix in key management trait that commit can be fallible.
     fn commit(
         &mut self,
         _rng: impl RngCore + CryptoRng,
