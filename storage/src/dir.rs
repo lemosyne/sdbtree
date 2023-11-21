@@ -46,6 +46,10 @@ impl Storage for DirectoryStorage {
     type WriteHandle<'a> = FromStd<File>;
     type RwHandle<'a> = FromStd<File>;
 
+    fn root_path(&self) -> String {
+        self.root.clone()
+    }
+
     fn alloc_id(&mut self) -> Result<Self::Id, Self::Error> {
         self.allocator.alloc().map_err(|_| Error::Alloc)
     }

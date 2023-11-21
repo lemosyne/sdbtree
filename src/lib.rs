@@ -1,5 +1,6 @@
 pub mod error;
 pub mod node;
+mod persist;
 #[cfg(test)]
 mod test;
 mod utils;
@@ -7,7 +8,6 @@ mod utils;
 pub use storage; // For re-export
 
 use crypter::{aes::Aes256Ctr, Crypter};
-use embedded_io::{blocking::Seek, SeekFrom};
 use error::Error;
 use kms::KeyManagementScheme;
 use node::{Child, Node};
@@ -32,26 +32,32 @@ pub struct BKeyTree<
     C = Aes256Ctr,
     const KEY_SZ: usize = AES256CTR_KEY_SZ,
 > {
-    len: usize,
-    degree: usize,
-    updated: HashSet<NodeId>,
-    updated_blocks: HashSet<BlockId>,
-    in_flight_blocks: HashMap<BlockId, Key<KEY_SZ>>,
     root: Node<KEY_SZ>,
-    meta_id: u64,
     storage: S,
     rng: R,
-    cached_keys: HashMap<BlockId, Key<KEY_SZ>>,
     pd: PhantomData<C>,
-}
 
-struct BKeyTreeMeta<const KEY_SZ: usize = AES256CTR_KEY_SZ> {
-    meta_id: u64,
-    len: usize,
+    // Degree metadata
     degree: usize,
+    degree_dirty: bool,
+
+    // Length metadata
+    len: usize,
+    len_dirty: bool,
+
+    // Updated node metadata
     updated: HashSet<NodeId>,
+    updated_dirty: bool,
+
+    // Updated block metadata
     updated_blocks: HashSet<BlockId>,
+    updated_blocks_dirty: bool,
+
+    // In-flight block metadata
     in_flight_blocks: HashMap<BlockId, Key<KEY_SZ>>,
+    in_flight_blocks_dirty: bool,
+
+    cached_keys: HashMap<BlockId, Key<KEY_SZ>>,
 }
 
 impl BKeyTree<ThreadRng, DirectoryStorage, Aes256Ctr, AES256CTR_KEY_SZ> {
@@ -91,17 +97,21 @@ where
 
     pub fn with_storage_and_degree(mut storage: S, degree: usize) -> Result<Self, Error> {
         Ok(Self {
-            len: 0,
-            degree,
-            updated: HashSet::new(),
-            updated_blocks: HashSet::new(),
-            in_flight_blocks: HashMap::new(),
             root: Node::new(storage.alloc_id().map_err(|_| Error::Storage)?),
-            meta_id: storage.alloc_id().map_err(|_| Error::Storage)?,
             storage,
             rng: R::default(),
-            cached_keys: HashMap::new(),
             pd: PhantomData,
+            degree,
+            degree_dirty: true,
+            len: 0,
+            len_dirty: true,
+            updated: HashSet::new(),
+            updated_dirty: true,
+            updated_blocks: HashSet::new(),
+            updated_blocks_dirty: true,
+            in_flight_blocks: HashMap::new(),
+            in_flight_blocks_dirty: true,
+            cached_keys: HashMap::new(),
         })
     }
 
@@ -114,209 +124,25 @@ where
         let root = Node::load::<C, S>(id, key, &mut storage)?;
 
         // Load the metadata.
-        let meta = Self::load_meta(root.id, &mut storage)?;
+        let meta = Self::load_meta(key, &mut storage)?;
 
         Ok(Self {
-            len: meta.len,
-            degree: meta.degree,
-            updated: meta.updated,
-            updated_blocks: meta.updated_blocks,
-            in_flight_blocks: meta.in_flight_blocks,
             root,
-            meta_id: meta.meta_id,
-            rng: R::default(),
             storage,
-            cached_keys: HashMap::new(),
+            rng: R::default(),
             pd: PhantomData,
+            degree: meta.degree,
+            degree_dirty: false,
+            len: meta.len,
+            len_dirty: false,
+            updated: meta.updated,
+            updated_dirty: false,
+            updated_blocks: meta.updated_blocks,
+            updated_blocks_dirty: false,
+            in_flight_blocks: meta.in_flight_blocks,
+            in_flight_blocks_dirty: false,
+            cached_keys: HashMap::new(),
         })
-    }
-
-    fn load_meta(root_id: u64, storage: &mut S) -> Result<BKeyTreeMeta<KEY_SZ>, Error>
-    where
-        S: Storage<Id = u64>,
-    {
-        let meta_id = {
-            let mut reader = storage.read_handle(&root_id).map_err(|_| Error::Storage)?;
-            reader
-                .seek(SeekFrom::End(-1 * mem::size_of::<u64>() as i64))
-                .map_err(|_| Error::Seek)?;
-            utils::read_u64::<S>(&mut reader)?
-        };
-
-        let mut reader = storage.read_handle(&meta_id).map_err(|_| Error::Storage)?;
-
-        let len = utils::read_u64::<S>(&mut reader)?;
-        let degree = utils::read_u64::<S>(&mut reader)?;
-
-        let updated_raw = utils::read_length_prefixed_bytes_clear::<S>(&mut reader)?;
-        let updated = bincode::deserialize(&updated_raw).map_err(|_| Error::Deserialization)?;
-
-        let updated_blocks_raw = utils::read_length_prefixed_bytes_clear::<S>(&mut reader)?;
-        let updated_blocks =
-            bincode::deserialize(&updated_blocks_raw).map_err(|_| Error::Deserialization)?;
-
-        let in_flight_blocks_raw = utils::read_length_prefixed_bytes_clear::<S>(&mut reader)?;
-        let in_flight_blocks = utils::deserialize_keys_map::<KEY_SZ>(&in_flight_blocks_raw);
-
-        Ok(BKeyTreeMeta {
-            meta_id,
-            len: len as usize,
-            degree: degree as usize,
-            updated,
-            updated_blocks,
-            in_flight_blocks,
-        })
-    }
-
-    fn persist_meta(&mut self) -> Result<(), Error>
-    where
-        S: Storage<Id = u64>,
-    {
-        {
-            let mut writer = self
-                .storage
-                .write_handle(&self.root.id)
-                .map_err(|_| Error::Storage)?;
-            writer.seek(SeekFrom::End(0)).map_err(|_| Error::Seek)?;
-            utils::write_u64::<S>(&mut writer, self.meta_id)?;
-        }
-
-        let mut writer = self
-            .storage
-            .write_handle(&self.meta_id)
-            .map_err(|_| Error::Storage)?;
-
-        utils::write_u64::<S>(&mut writer, self.len as u64)?;
-        utils::write_u64::<S>(&mut writer, self.degree as u64)?;
-
-        let updated_raw = bincode::serialize(&self.updated).map_err(|_| Error::Serialization)?;
-        utils::write_length_prefixed_bytes_clear::<S>(&mut writer, &updated_raw)?;
-
-        let updated_blocks_raw =
-            bincode::serialize(&self.updated_blocks).map_err(|_| Error::Serialization)?;
-        utils::write_length_prefixed_bytes_clear::<S>(&mut writer, &updated_blocks_raw)?;
-
-        let in_flight_blocks_raw = utils::serialize_keys_map(&self.in_flight_blocks);
-        utils::write_length_prefixed_bytes_clear::<S>(&mut writer, &in_flight_blocks_raw)?;
-
-        Ok(())
-    }
-
-    fn persist_meta_to<T: Storage<Id = u64>>(&mut self, storage: &mut T) -> Result<(), Error> {
-        {
-            let mut writer = storage
-                .write_handle(&self.root.id)
-                .map_err(|_| Error::Storage)?;
-            writer.seek(SeekFrom::End(0)).map_err(|_| Error::Seek)?;
-            utils::write_u64::<T>(&mut writer, self.meta_id)?;
-        }
-
-        let mut writer = storage
-            .write_handle(&self.meta_id)
-            .map_err(|_| Error::Storage)?;
-
-        utils::write_u64::<T>(&mut writer, self.len as u64)?;
-        utils::write_u64::<T>(&mut writer, self.degree as u64)?;
-
-        let updated_raw = bincode::serialize(&self.updated).map_err(|_| Error::Serialization)?;
-        utils::write_length_prefixed_bytes_clear::<T>(&mut writer, &updated_raw)?;
-
-        let updated_blocks_raw =
-            bincode::serialize(&self.updated_blocks).map_err(|_| Error::Serialization)?;
-        utils::write_length_prefixed_bytes_clear::<T>(&mut writer, &updated_blocks_raw)?;
-
-        let in_flight_blocks_raw = utils::serialize_keys_map(&self.in_flight_blocks);
-        utils::write_length_prefixed_bytes_clear::<T>(&mut writer, &in_flight_blocks_raw)?;
-
-        Ok(())
-    }
-
-    pub fn load(&mut self, id: NodeId, key: Key<KEY_SZ>) -> Result<(), Error> {
-        // Load the root node.
-        let root = Node::load::<C, S>(id, key, &mut self.storage)?;
-
-        // Load the metadata.
-        let meta = Self::load_meta(root.id, &mut self.storage)?;
-
-        // Update state after the fallible operations.
-        self.root = root;
-        self.meta_id = meta.meta_id;
-        self.len = meta.len;
-        self.degree = meta.degree;
-        self.updated = meta.updated;
-        self.updated_blocks = meta.updated_blocks;
-        self.in_flight_blocks = meta.in_flight_blocks;
-
-        Ok(())
-    }
-
-    pub fn persist(&mut self, key: Key<KEY_SZ>) -> Result<(), Error> {
-        // Persist the root node.
-        self.root
-            .persist::<C, S>(key, &mut self.storage)
-            .map_err(|_| Error::Storage)?;
-
-        // Persist the metadata.
-        self.persist_meta()?;
-
-        Ok(())
-    }
-
-    pub fn persist_to<T: Storage<Id = u64>>(
-        &mut self,
-        key: Key<KEY_SZ>,
-        storage: &mut T,
-    ) -> Result<(), Error> {
-        // Persist the root node.
-        self.root
-            .persist::<C, T>(key, storage)
-            .map_err(|_| Error::Storage)?;
-
-        // Persist the metadata.
-        self.persist_meta_to(storage)?;
-
-        Ok(())
-    }
-
-    pub fn persist_block(&mut self, block: &BlockId, key: Key<KEY_SZ>) -> Result<bool, Error> {
-        // If the block is in-flight, insert without marking nodes in the path as updated.
-        if let Some(block_key) = self.in_flight_blocks.remove(block) {
-            self.insert_no_update(*block, block_key)?;
-        }
-
-        // Persist the block, persisting any nodes along the way.
-        let res = self
-            .root
-            .persist_block::<C, S>(block, key, &mut self.storage)?;
-
-        // Persist the metadata if we persisted the block.
-        if res {
-            self.persist_meta()?;
-        }
-
-        Ok(res)
-    }
-
-    pub fn persist_block_to<T: Storage<Id = u64>>(
-        &mut self,
-        block: &BlockId,
-        key: Key<KEY_SZ>,
-        storage: &mut T,
-    ) -> Result<bool, Error> {
-        // If the block is in-flight, insert without marking nodes in the path as updated.
-        if let Some(block_key) = self.in_flight_blocks.remove(block) {
-            self.insert_no_update(*block, block_key)?;
-        }
-
-        // Persist the block, persisting any nodes along the way.
-        let res = self.root.persist_block::<C, T>(block, key, storage)?;
-
-        // Persist the metadata if we persisted the block.
-        if res {
-            self.persist_meta_to(storage)?;
-        }
-
-        Ok(res)
     }
 
     pub fn len(&self) -> usize {
@@ -402,12 +228,16 @@ where
 
         if res.is_none() {
             self.len += 1;
+            self.len_dirty = true;
         }
+
+        self.updated_dirty = true;
 
         Ok(res)
     }
 
     /// Inserts a key without marking any of the nodes touched on the way down as updated.
+    /// NOTE: Currently unused
     pub fn insert_no_update(
         &mut self,
         k: BlockId,
@@ -468,7 +298,10 @@ where
             if !self.root.is_leaf() && self.root.is_empty() {
                 self.root = self.root.children.pop().unwrap().as_option_owned().unwrap();
             }
+
             self.len -= 1;
+            self.len_dirty = true;
+
             Ok(Some(entry))
         } else {
             Ok(None)
@@ -476,11 +309,13 @@ where
     }
 
     /// Removes without marking nodes as updated.
+    /// NOTE: Currently unused
     pub fn remove_no_update(&mut self, k: &BlockId) -> Result<Option<Key<KEY_SZ>>, Error> {
         Ok(self.remove_entry_no_update(k)?.map(|(_, val)| val))
     }
 
     /// Removes an entry without marking nodes as updated.
+    /// NOTE: Currently unused
     pub fn remove_entry_no_update(
         &mut self,
         k: &BlockId,
@@ -496,7 +331,9 @@ where
             if !self.root.is_leaf() && self.root.is_empty() {
                 self.root = self.root.children.pop().unwrap().as_option_owned().unwrap();
             }
+
             self.len -= 1;
+
             Ok(Some(entry))
         } else {
             Ok(None)
@@ -504,9 +341,12 @@ where
     }
 
     pub fn clear(&mut self) -> Result<NodeId, Error> {
-        self.len = 0;
         self.root.clear::<C, S>(&mut self.storage)?;
         self.root = Node::new(self.storage.alloc_id().map_err(|_| Error::Storage)?);
+
+        self.len = 0;
+        self.len_dirty = true;
+
         Ok(self.root.id)
     }
 
@@ -529,27 +369,37 @@ where
 
     fn derive(&mut self, block_id: Self::KeyId) -> Result<Self::Key, Self::Error> {
         if let Some(key) = self.cached_keys.get(&block_id) {
+            // eprintln!("found cached key for {block_id}");
             return Ok(*key);
         }
 
         if let Some(key) = self.get(&block_id)? {
+            // eprintln!("found existing key for {block_id}");
             return Ok(*key);
         }
 
         if let Some(key) = self.in_flight_blocks.get(&block_id) {
+            // eprintln!("found inflight key for {block_id}");
             return Ok(*key);
         }
 
         let key = self.generate_key();
-        self.in_flight_blocks.insert(block_id, key);
         self.cached_keys.insert(block_id, key);
+
+        self.in_flight_blocks.insert(block_id, key);
+        self.in_flight_blocks_dirty = true;
+
+        // eprintln!("add key for {block_id}");
 
         Ok(key)
     }
 
     fn update(&mut self, block_id: Self::KeyId) -> Result<Self::Key, Self::Error> {
         let key = self.derive(block_id)?;
+
         self.updated_blocks.insert(block_id);
+        self.updated_blocks_dirty = true;
+
         Ok(key)
     }
 
@@ -586,10 +436,16 @@ where
             .unwrap();
 
         // Clear out our cached updates.
-        self.updated.clear();
-        self.in_flight_blocks.clear();
-        self.updated_blocks.clear();
         self.cached_keys.clear();
+
+        self.updated.clear();
+        self.updated_dirty = true;
+
+        self.in_flight_blocks.clear();
+        self.in_flight_blocks_dirty = true;
+
+        self.updated_blocks.clear();
+        self.updated_blocks_dirty = true;
 
         Ok(res)
     }

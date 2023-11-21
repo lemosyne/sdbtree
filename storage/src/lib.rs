@@ -26,6 +26,9 @@ pub trait Storage {
     where
         Self: 'a;
 
+    /// Returns the root path.
+    fn root_path(&self) -> String;
+
     /// Allocates an object `id`.
     fn alloc_id(&mut self) -> Result<Self::Id, Self::Error>;
 

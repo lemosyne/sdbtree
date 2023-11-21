@@ -10,6 +10,7 @@ cryptio = { path = "../cryptio" }
 embedded-io = { path = "../embedded-io" }
 kms = { path = "../kms" }
 rand = "0.8.5"
+serde = { version = "1.0.193", features = ["derive"] }
 storage = { version = "0.1.0", path = "storage", features = ["dir"] }
 thiserror = "1.0.49"
 

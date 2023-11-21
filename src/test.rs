@@ -69,7 +69,7 @@ fn reloading() -> Result<()> {
     for block in 0..1000 {
         let key = utils::generate_key(&mut rng);
         map.insert(block, key);
-        assert_eq!(tree.insert_no_update(block, key)?, None);
+        assert_eq!(tree.insert(block, key)?, None);
         assert_eq!(tree.len(), block as usize + 1);
     }
 
@@ -84,7 +84,7 @@ fn reloading() -> Result<()> {
         assert_eq!(tree.get_key_value(&block)?, Some((&block, &key)));
     }
 
-    let _ = fs::remove_dir_all("/tmp/bkeytreedir-reload");
+    // let _ = fs::remove_dir_all("/tmp/bkeytreedir-reload");
 
     Ok(())
 }

@@ -26,11 +26,12 @@ impl<const KEY_SZ: usize> Child<KEY_SZ> {
 }
 
 pub struct Node<const KEY_SZ: usize> {
-    pub(crate) id: NodeId,
-    pub(crate) keys: Vec<BlockId>,
-    pub(crate) vals: Vec<Key<KEY_SZ>>,
-    pub(crate) children: Vec<Child<KEY_SZ>>,
-    pub(crate) children_keys: Vec<Key<KEY_SZ>>,
+    pub id: NodeId,
+    pub keys: Vec<BlockId>,
+    pub vals: Vec<Key<KEY_SZ>>,
+    pub children: Vec<Child<KEY_SZ>>,
+    pub children_keys: Vec<Key<KEY_SZ>>,
+    pub dirty: bool,
 }
 
 impl<const KEY_SZ: usize> Node<KEY_SZ> {
@@ -41,6 +42,7 @@ impl<const KEY_SZ: usize> Node<KEY_SZ> {
             vals: Vec::new(),
             children: Vec::new(),
             children_keys: Vec::new(),
+            dirty: false,
         }
     }
 
@@ -60,6 +62,10 @@ impl<const KEY_SZ: usize> Node<KEY_SZ> {
         self.children.is_empty()
     }
 
+    pub fn is_dirty(&self) -> bool {
+        self.dirty
+    }
+
     pub fn load<C, S>(id: u64, key: Key<KEY_SZ>, storage: &mut S) -> Result<Self, Error>
     where
         C: Crypter,
@@ -69,11 +75,10 @@ impl<const KEY_SZ: usize> Node<KEY_SZ> {
         let mut reader = storage.read_handle(&id).map_err(|_| Error::Storage)?;
 
         // Read the fields, each of which is serialized as a length-prefixed array of bytes.
-        let keys_raw = utils::read_length_prefixed_bytes::<C, S, KEY_SZ>(&mut reader, key)?;
-        let vals_raw = utils::read_length_prefixed_bytes::<C, S, KEY_SZ>(&mut reader, key)?;
-        let children_raw = utils::read_length_prefixed_bytes::<C, S, KEY_SZ>(&mut reader, key)?;
-        let children_keys_raw =
-            utils::read_length_prefixed_bytes::<C, S, KEY_SZ>(&mut reader, key)?;
+        let keys_raw = utils::read_length_prefixed_bytes::<C, KEY_SZ>(&mut reader, key)?;
+        let vals_raw = utils::read_length_prefixed_bytes::<C, KEY_SZ>(&mut reader, key)?;
+        let children_raw = utils::read_length_prefixed_bytes::<C, KEY_SZ>(&mut reader, key)?;
+        let children_keys_raw = utils::read_length_prefixed_bytes::<C, KEY_SZ>(&mut reader, key)?;
 
         Ok(Self {
             id,
@@ -84,17 +89,21 @@ impl<const KEY_SZ: usize> Node<KEY_SZ> {
                 .map(|id| Child::Unloaded(id))
                 .collect(),
             children_keys: utils::deserialize_keys(&children_keys_raw),
+            dirty: false,
         })
     }
 
-    pub fn persist<C, S>(&self, key: Key<KEY_SZ>, storage: &mut S) -> Result<(), Error>
+    pub fn persist<C, S>(&mut self, key: Key<KEY_SZ>, storage: &mut S) -> Result<(), Error>
     where
         C: Crypter,
         S: Storage<Id = u64>,
     {
-        self.persist_node::<C, S>(key, storage)?;
+        // If we aren't dirty, we already persisted changes to all our children.
+        if !self.is_dirty() {
+            return Ok(());
+        }
 
-        for (i, child) in self.children.iter().enumerate() {
+        for (i, child) in self.children.iter_mut().enumerate() {
             match child {
                 Child::Loaded(node) => {
                     node.persist::<C, S>(self.children_keys[i], storage)?;
@@ -102,6 +111,8 @@ impl<const KEY_SZ: usize> Node<KEY_SZ> {
                 _ => {}
             }
         }
+
+        self.persist_node::<C, S>(key, storage)?;
 
         Ok(())
     }
@@ -132,11 +143,16 @@ impl<const KEY_SZ: usize> Node<KEY_SZ> {
         }
     }
 
-    pub fn persist_node<C, S>(&self, key: Key<KEY_SZ>, storage: &mut S) -> Result<(), Error>
+    pub fn persist_node<C, S>(&mut self, key: Key<KEY_SZ>, storage: &mut S) -> Result<(), Error>
     where
         C: Crypter,
         S: Storage<Id = u64>,
     {
+        // If the node isn't dirty, then we don't need to write it.
+        if !self.is_dirty() {
+            return Ok(());
+        }
+
         // Serialize the keys and values.
         // This should really be done in one shot.
         let keys_raw = utils::serialize_ids(&self.keys);
@@ -159,10 +175,13 @@ impl<const KEY_SZ: usize> Node<KEY_SZ> {
         let mut writer = storage.write_handle(&self.id).map_err(|_| Error::Storage)?;
 
         // Write each of the fields as a length-prefixed array of bytes.
-        utils::write_length_prefixed_bytes::<C, S, KEY_SZ>(&mut writer, &keys_raw, key)?;
-        utils::write_length_prefixed_bytes::<C, S, KEY_SZ>(&mut writer, &vals_raw, key)?;
-        utils::write_length_prefixed_bytes::<C, S, KEY_SZ>(&mut writer, &children_raw, key)?;
-        utils::write_length_prefixed_bytes::<C, S, KEY_SZ>(&mut writer, &children_keys_raw, key)?;
+        utils::write_length_prefixed_bytes::<C, KEY_SZ>(&mut writer, &keys_raw, key)?;
+        utils::write_length_prefixed_bytes::<C, KEY_SZ>(&mut writer, &vals_raw, key)?;
+        utils::write_length_prefixed_bytes::<C, KEY_SZ>(&mut writer, &children_raw, key)?;
+        utils::write_length_prefixed_bytes::<C, KEY_SZ>(&mut writer, &children_keys_raw, key)?;
+
+        // Mark node as clean.
+        self.dirty = false;
 
         Ok(())
     }
@@ -291,6 +310,10 @@ impl<const KEY_SZ: usize> Node<KEY_SZ> {
             updated.insert(self.id);
             updated.insert(left.id);
             updated.insert(right.id);
+
+            self.dirty = true;
+            left.dirty = true;
+            right.dirty = true;
         }
 
         // Insert new key, value, right child, and its key into the root.
@@ -328,6 +351,7 @@ impl<const KEY_SZ: usize> Node<KEY_SZ> {
             // that will be updated, so it must be added.
             if should_update {
                 updated.insert(node.id);
+                node.dirty = true;
             }
 
             // Insert key and value into non-full node.
@@ -404,6 +428,7 @@ impl<const KEY_SZ: usize> Node<KEY_SZ> {
         if should_update {
             // Update the nodes that were modified
             updated.insert(self.id);
+            self.dirty = true;
         }
 
         let mut idx = self.find_index(k);
@@ -441,6 +466,7 @@ impl<const KEY_SZ: usize> Node<KEY_SZ> {
                 if should_update {
                     // Update the nodes that were modified.
                     updated.insert(pred.id);
+                    pred.dirty = true;
                 }
 
                 return Ok(Some((pred_key, pred_val)));
@@ -468,6 +494,7 @@ impl<const KEY_SZ: usize> Node<KEY_SZ> {
                 if should_update {
                     // Update the nodes that were modified.
                     updated.insert(succ.id);
+                    succ.dirty = true;
                 }
 
                 return Ok(Some((succ_key, succ_val)));
@@ -499,6 +526,7 @@ impl<const KEY_SZ: usize> Node<KEY_SZ> {
                     // Since the successor doesn't exist anymore, we can remove it.
                     updated.remove(&succ.id);
                     updated.insert(pred.id);
+                    pred.dirty = true;
                 }
 
                 return pred.remove::<C, S>(k, degree, storage, updated, should_update);
@@ -527,6 +555,7 @@ impl<const KEY_SZ: usize> Node<KEY_SZ> {
                     if should_update {
                         // Update the nodes that were modified.
                         updated.insert(mid.id);
+                        mid.dirty = true;
                     }
                 }
 
@@ -539,6 +568,7 @@ impl<const KEY_SZ: usize> Node<KEY_SZ> {
                     if should_update {
                         // Update the nodes that were modified.
                         updated.insert(left.id);
+                        left.dirty = true;
                     }
 
                     self.keys.insert(idx - 1, left_key);
@@ -572,6 +602,7 @@ impl<const KEY_SZ: usize> Node<KEY_SZ> {
                     if should_update {
                         // Update the nodes that were modified.
                         updated.insert(mid.id);
+                        mid.dirty = true;
                     }
                 }
 
@@ -584,6 +615,7 @@ impl<const KEY_SZ: usize> Node<KEY_SZ> {
                     if should_update {
                         // Update the nodes that were modified.
                         updated.insert(right.id);
+                        right.dirty = true;
                     }
 
                     self.keys.insert(idx, right_key);
@@ -617,6 +649,7 @@ impl<const KEY_SZ: usize> Node<KEY_SZ> {
                     if should_update {
                         // Update the nodes that were modified.
                         updated.insert(mid.id);
+                        mid.dirty = true;
                     }
 
                     let left = self.access_child::<C, S>(idx - 1, storage)?;
@@ -632,6 +665,7 @@ impl<const KEY_SZ: usize> Node<KEY_SZ> {
                     if should_update {
                         // Update the nodes that were modified.
                         updated.insert(left.id);
+                        left.dirty = true;
                     }
                 }
 
@@ -658,6 +692,7 @@ impl<const KEY_SZ: usize> Node<KEY_SZ> {
                     if should_update {
                         // Update the nodes that were modified.
                         updated.insert(right.id);
+                        right.dirty = true;
                     }
 
                     let mid = self.access_child::<C, S>(idx, storage)?;
@@ -671,6 +706,7 @@ impl<const KEY_SZ: usize> Node<KEY_SZ> {
                     if should_update {
                         // Update the nodes that were modified.
                         updated.insert(mid.id);
+                        mid.dirty = true;
                     }
                 }
 
@@ -720,32 +756,64 @@ impl<const KEY_SZ: usize> Node<KEY_SZ> {
         S: Storage<Id = u64>,
     {
         // Update the keys for children that were updated.
-        for idx in self
-            .children
-            .iter()
-            .enumerate()
-            .map(|(i, child)| match child {
-                Child::Loaded(node) => (i, node.id),
-                Child::Unloaded(id) => (i, *id),
-            })
-            .filter_map(|(idx, id)| updated.contains(&id).then_some(idx))
-        {
-            self.children_keys[idx] = utils::generate_key(rng);
-        }
+        // for idx in self
+        //     .children
+        //     .iter()
+        //     .enumerate()
+        //     .map(|(i, child)| match child {
+        //         Child::Loaded(node) => (i, node.id),
+        //         Child::Unloaded(id) => (i, *id),
+        //     })
+        //     .filter_map(|(idx, id)| updated.contains(&id).then_some(idx))
+        // {
+        //     self.children_keys[idx] = utils::generate_key(rng);
+        // }
 
-        // Only recurse down loaded nodes. If nodes were updated, they must have been brought in.
-        // Before we go down, we update any necessary keys in the child.
-        for child in self.children.iter_mut() {
+        // // Only recurse down loaded nodes. If nodes were updated, they must have been brought in.
+        // // Before we go down, we update any necessary keys in the child.
+        // for child in self.children.iter_mut() {
+        //     match child {
+        //         Child::Loaded(node) => {
+        //             for (i, k) in node.keys.iter_mut().enumerate() {
+        //                 if updated_blocks.contains(k) {
+        //                     node.vals[i] = utils::generate_key(rng);
+        //                 }
+        //             }
+        //             node.commit::<C, R, S>(storage, rng, updated, updated_blocks)?
+        //         }
+        //         _ => {}
+        //     }
+        // }
+
+        // Update the keys for children that were updated.
+        // Also recurse downwards and commit children as well.
+        // We know that any updated children and their ancestors must be loaded.
+        for (idx, child) in self.children.iter_mut().enumerate() {
             match child {
                 Child::Loaded(node) => {
+                    // Generate a new key for every block that was updated.
+                    // This makes the node dirty.
                     for (i, k) in node.keys.iter_mut().enumerate() {
                         if updated_blocks.contains(k) {
                             node.vals[i] = utils::generate_key(rng);
+                            node.dirty = true;
                         }
                     }
-                    node.commit::<C, R, S>(storage, rng, updated, updated_blocks)?
+
+                    // If the child was updated, then replace its key.
+                    if updated.contains(&node.id) {
+                        self.children_keys[idx] = utils::generate_key(rng);
+                    }
+
+                    // Recursively commit children.
+                    node.commit::<C, R, S>(storage, rng, updated, updated_blocks)?;
                 }
-                _ => {}
+                Child::Unloaded(id) => {
+                    // If the child was updated, then replace its key.
+                    if updated.contains(id) {
+                        self.children_keys[idx] = utils::generate_key(rng);
+                    }
+                }
             }
         }
 
