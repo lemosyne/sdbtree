@@ -84,7 +84,7 @@ fn reloading() -> Result<()> {
         assert_eq!(tree.get_key_value(&block)?, Some((&block, &key)));
     }
 
-    // let _ = fs::remove_dir_all("/tmp/bkeytreedir-reload");
+    let _ = fs::remove_dir_all("/tmp/bkeytreedir-reload");
 
     Ok(())
 }

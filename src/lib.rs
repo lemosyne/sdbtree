@@ -53,10 +53,6 @@ pub struct BKeyTree<
     updated_blocks: HashSet<BlockId>,
     updated_blocks_dirty: bool,
 
-    // In-flight block metadata
-    in_flight_blocks: HashMap<BlockId, Key<KEY_SZ>>,
-    in_flight_blocks_dirty: bool,
-
     cached_keys: HashMap<BlockId, Key<KEY_SZ>>,
 }
 
@@ -109,8 +105,6 @@ where
             updated_dirty: true,
             updated_blocks: HashSet::new(),
             updated_blocks_dirty: true,
-            in_flight_blocks: HashMap::new(),
-            in_flight_blocks_dirty: true,
             cached_keys: HashMap::new(),
         })
     }
@@ -139,8 +133,6 @@ where
             updated_dirty: false,
             updated_blocks: meta.updated_blocks,
             updated_blocks_dirty: false,
-            in_flight_blocks: meta.in_flight_blocks,
-            in_flight_blocks_dirty: false,
             cached_keys: HashMap::new(),
         })
     }
@@ -378,18 +370,11 @@ where
             return Ok(*key);
         }
 
-        if let Some(key) = self.in_flight_blocks.get(&block_id) {
-            // eprintln!("found inflight key for {block_id}");
-            return Ok(*key);
-        }
-
         let key = self.generate_key();
         self.cached_keys.insert(block_id, key);
 
-        self.in_flight_blocks.insert(block_id, key);
-        self.in_flight_blocks_dirty = true;
-
         // eprintln!("add key for {block_id}");
+        self.insert(block_id, key)?;
 
         Ok(key)
     }
@@ -407,17 +392,6 @@ where
         &mut self,
         _rng: impl RngCore + CryptoRng,
     ) -> Result<Vec<(Self::KeyId, Self::Key)>, Self::Error> {
-        // Add any in-flight blocks that haven't been updated.
-        let inflight_blocks = self
-            .in_flight_blocks
-            .iter()
-            .filter_map(|(k, v)| (!self.updated_blocks.contains(k)).then_some((*k, *v)))
-            .collect::<Vec<_>>();
-
-        for (block, key) in inflight_blocks.into_iter() {
-            self.insert(block, key)?;
-        }
-
         // Build our vector of blocks and pre-commit keys.
         let mut res = vec![];
         for block in self.updated_blocks.clone() {
@@ -440,9 +414,6 @@ where
 
         self.updated.clear();
         self.updated_dirty = true;
-
-        self.in_flight_blocks.clear();
-        self.in_flight_blocks_dirty = true;
 
         self.updated_blocks.clear();
         self.updated_blocks_dirty = true;

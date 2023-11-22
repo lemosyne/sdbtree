@@ -2,10 +2,7 @@ use crate::{error::Error, node::Node, utils, BKeyTree, BlockId, Key, NodeId, AES
 use crypter::Crypter;
 use embedded_io::adapters::FromStd;
 use rand::{CryptoRng, RngCore};
-use std::{
-    collections::{HashMap, HashSet},
-    fs::File,
-};
+use std::{collections::HashSet, fs::File};
 use storage::Storage;
 
 pub struct BKeyTreeMeta<const KEY_SZ: usize = AES256CTR_KEY_SZ> {
@@ -13,7 +10,6 @@ pub struct BKeyTreeMeta<const KEY_SZ: usize = AES256CTR_KEY_SZ> {
     pub len: usize,
     pub updated: HashSet<NodeId>,
     pub updated_blocks: HashSet<BlockId>,
-    pub in_flight_blocks: HashMap<BlockId, Key<KEY_SZ>>,
 }
 
 impl<R, S, C, const KEY_SZ: usize> BKeyTree<R, S, C, KEY_SZ>
@@ -54,14 +50,6 @@ where
         format!("{}/updated_blocks", storage.root_path())
     }
 
-    fn in_flight_blocks_path(&self) -> String {
-        format!("{}/in_flight_blocks", self.storage.root_path())
-    }
-
-    fn in_flight_blocks_path_in<T: Storage>(storage: &T) -> String {
-        format!("{}/in_flight_blocks", storage.root_path())
-    }
-
     fn new_rw_io(path: &str) -> Result<FromStd<File>, Error> {
         Ok(FromStd::new(
             File::options()
@@ -72,7 +60,7 @@ where
         ))
     }
 
-    pub fn load_meta(key: Key<KEY_SZ>, storage: &mut S) -> Result<BKeyTreeMeta<KEY_SZ>, Error>
+    pub fn load_meta(_key: Key<KEY_SZ>, storage: &mut S) -> Result<BKeyTreeMeta<KEY_SZ>, Error>
     where
         S: Storage<Id = u64>,
     {
@@ -98,33 +86,31 @@ where
             bincode::deserialize(&updated_blocks_raw).map_err(|_| Error::Deserialization)?
         };
 
-        let in_flight_blocks = {
-            let mut reader = Self::new_rw_io(&Self::in_flight_blocks_path_in(storage))?;
-            let in_flight_blocks_raw =
-                utils::read_length_prefixed_bytes::<C, KEY_SZ>(&mut reader, key)?;
-            utils::deserialize_keys_map::<KEY_SZ>(&in_flight_blocks_raw)
-        };
-
         Ok(BKeyTreeMeta {
             len,
             degree,
             updated,
             updated_blocks,
-            in_flight_blocks,
         })
     }
 
-    pub fn persist_meta(&mut self, key: Key<KEY_SZ>) -> Result<(), Error> {
+    pub fn persist_meta(&mut self, _key: Key<KEY_SZ>) -> Result<(), Error> {
         if self.degree_dirty {
             let mut writer = Self::new_rw_io(&self.degree_path())?;
             utils::write_u64(&mut writer, self.degree as u64)?;
             self.degree_dirty = false;
+            // eprintln!("newly persisted degree");
+        } else {
+            // eprintln!("already persisted degree");
         }
 
         if self.len_dirty {
             let mut writer = Self::new_rw_io(&self.len_path())?;
             utils::write_u64(&mut writer, self.len as u64)?;
             self.len_dirty = false;
+            // eprintln!("newly persisted len");
+        } else {
+            // eprintln!("already persisted len");
         }
 
         if self.updated_dirty {
@@ -133,6 +119,9 @@ where
                 bincode::serialize(&self.updated).map_err(|_| Error::Serialization)?;
             utils::write_length_prefixed_bytes_clear(&mut writer, &updated_raw)?;
             self.updated_dirty = false;
+            // eprintln!("newly persisted updated");
+        } else {
+            // eprintln!("already persisted updated");
         }
 
         if self.updated_blocks_dirty {
@@ -141,17 +130,9 @@ where
                 bincode::serialize(&self.updated_blocks).map_err(|_| Error::Serialization)?;
             utils::write_length_prefixed_bytes_clear(&mut writer, &updated_blocks_raw)?;
             self.updated_blocks_dirty = false;
-        }
-
-        if self.in_flight_blocks_dirty {
-            let mut writer = Self::new_rw_io(&self.in_flight_blocks_path())?;
-            let in_flight_blocks_raw = utils::serialize_keys_map(&self.in_flight_blocks);
-            utils::write_length_prefixed_bytes::<C, KEY_SZ>(
-                &mut writer,
-                &in_flight_blocks_raw,
-                key,
-            )?;
-            self.in_flight_blocks_dirty = false;
+            // eprintln!("newly persisted updated blocks");
+        } else {
+            // eprintln!("already persisted updated blocks");
         }
 
         Ok(())
@@ -159,7 +140,7 @@ where
 
     pub fn persist_meta_to<T: Storage<Id = u64>>(
         &mut self,
-        key: Key<KEY_SZ>,
+        _key: Key<KEY_SZ>,
         storage: &mut T,
     ) -> Result<(), Error> {
         let mut writer = Self::new_rw_io(&Self::degree_path_in(storage))?;
@@ -177,10 +158,6 @@ where
             bincode::serialize(&self.updated_blocks).map_err(|_| Error::Serialization)?;
         utils::write_length_prefixed_bytes_clear(&mut writer, &updated_blocks_raw)?;
 
-        let mut writer = Self::new_rw_io(&Self::in_flight_blocks_path_in(storage))?;
-        let in_flight_blocks_raw = utils::serialize_keys_map(&self.in_flight_blocks);
-        utils::write_length_prefixed_bytes::<C, KEY_SZ>(&mut writer, &in_flight_blocks_raw, key)?;
-
         Ok(())
     }
 
@@ -197,7 +174,6 @@ where
         self.len = meta.len;
         self.updated = meta.updated;
         self.updated_blocks = meta.updated_blocks;
-        self.in_flight_blocks = meta.in_flight_blocks;
 
         Ok(())
     }
@@ -231,12 +207,6 @@ where
     }
 
     pub fn persist_block(&mut self, block: &BlockId, key: Key<KEY_SZ>) -> Result<bool, Error> {
-        // If the block is in-flight, then we only need to persist the metadata.
-        if self.in_flight_blocks.contains_key(block) {
-            self.persist_meta(key)?;
-            return Ok(true);
-        }
-
         // if let Some(block_key) = self.in_flight_blocks.remove(block) {
         //     // eprintln!("block {block} inflight");
         //     self.insert(*block, block_key)?;
@@ -251,7 +221,7 @@ where
 
         // Persist the metadata if we persisted the block.
         if res {
-            eprintln!("persisted block: {block}");
+            // eprintln!("persisted block: {block}");
             self.persist_meta(key)?;
         } else {
             // eprintln!("not persisting block: {block}");
@@ -266,12 +236,6 @@ where
         key: Key<KEY_SZ>,
         storage: &mut T,
     ) -> Result<bool, Error> {
-        // If the block is in-flight, then we only need to persist the metadata.
-        if self.in_flight_blocks.contains_key(block) {
-            self.persist_meta_to(key, storage)?;
-            return Ok(true);
-        }
-
         // // If the block is in-flight, insert it.
         // if let Some(block_key) = self.in_flight_blocks.remove(block) {
         //     self.insert_no_update(*block, block_key)?;
