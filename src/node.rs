@@ -42,7 +42,7 @@ impl<const KEY_SZ: usize> Node<KEY_SZ> {
             vals: Vec::new(),
             children: Vec::new(),
             children_keys: Vec::new(),
-            dirty: false,
+            dirty: true,
         }
     }
 
@@ -150,8 +150,11 @@ impl<const KEY_SZ: usize> Node<KEY_SZ> {
     {
         // If the node isn't dirty, then we don't need to write it.
         if !self.is_dirty() {
+            // eprintln!("node {} is clean, skipping", self.id);
             return Ok(());
         }
+
+        // eprintln!("node {} is dirty, persisting", self.id);
 
         // Serialize the keys and values.
         // This should really be done in one shot.

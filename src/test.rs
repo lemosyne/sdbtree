@@ -66,11 +66,9 @@ fn reloading() -> Result<()> {
     let mut map = HashMap::new();
     let mut tree = BKeyTree::new("/tmp/bkeytreedir-reload")?;
 
-    for block in 0..1000 {
-        let key = utils::generate_key(&mut rng);
+    for block in 0..100000 {
+        let key = tree.derive(block)?;
         map.insert(block, key);
-        assert_eq!(tree.insert(block, key)?, None);
-        assert_eq!(tree.len(), block as usize + 1);
     }
 
     let key = utils::generate_key(&mut rng);
@@ -79,12 +77,12 @@ fn reloading() -> Result<()> {
 
     let mut tree = BKeyTree::reload(root_id, "/tmp/bkeytreedir-reload", key)?;
 
-    for block in 0..1000 {
+    for block in 0..100000 {
         let key = map.remove(&block).unwrap();
-        assert_eq!(tree.get_key_value(&block)?, Some((&block, &key)));
+        assert_eq!(tree.derive(block)?, key);
     }
 
-    let _ = fs::remove_dir_all("/tmp/bkeytreedir-reload");
+    // let _ = fs::remove_dir_all("/tmp/bkeytreedir-reload");
 
     Ok(())
 }

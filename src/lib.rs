@@ -223,6 +223,7 @@ where
             self.len_dirty = true;
         }
 
+        self.root.dirty = true;
         self.updated_dirty = true;
 
         Ok(res)
