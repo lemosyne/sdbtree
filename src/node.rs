@@ -759,66 +759,66 @@ impl<const KEY_SZ: usize> Node<KEY_SZ> {
         S: Storage<Id = u64>,
     {
         // Update the keys for children that were updated.
-        // for idx in self
-        //     .children
-        //     .iter()
-        //     .enumerate()
-        //     .map(|(i, child)| match child {
-        //         Child::Loaded(node) => (i, node.id),
-        //         Child::Unloaded(id) => (i, *id),
-        //     })
-        //     .filter_map(|(idx, id)| updated.contains(&id).then_some(idx))
-        // {
-        //     self.children_keys[idx] = utils::generate_key(rng);
-        // }
+        for idx in self
+            .children
+            .iter()
+            .enumerate()
+            .map(|(i, child)| match child {
+                Child::Loaded(node) => (i, node.id),
+                Child::Unloaded(id) => (i, *id),
+            })
+            .filter_map(|(idx, id)| updated.contains(&id).then_some(idx))
+        {
+            self.children_keys[idx] = utils::generate_key(rng);
+        }
 
-        // // Only recurse down loaded nodes. If nodes were updated, they must have been brought in.
-        // // Before we go down, we update any necessary keys in the child.
-        // for child in self.children.iter_mut() {
-        //     match child {
-        //         Child::Loaded(node) => {
-        //             for (i, k) in node.keys.iter_mut().enumerate() {
-        //                 if updated_blocks.contains(k) {
-        //                     node.vals[i] = utils::generate_key(rng);
-        //                 }
-        //             }
-        //             node.commit::<C, R, S>(storage, rng, updated, updated_blocks)?
-        //         }
-        //         _ => {}
-        //     }
-        // }
+        // Only recurse down loaded nodes. If nodes were updated, they must have been brought in.
+        // Before we go down, we update any necessary keys in the child.
+        for child in self.children.iter_mut() {
+            match child {
+                Child::Loaded(node) => {
+                    for (i, k) in node.keys.iter_mut().enumerate() {
+                        if updated_blocks.contains(k) {
+                            node.vals[i] = utils::generate_key(rng);
+                        }
+                    }
+                    node.commit::<C, R, S>(storage, rng, updated, updated_blocks)?
+                }
+                _ => {}
+            }
+        }
 
         // Update the keys for children that were updated.
         // Also recurse downwards and commit children as well.
         // We know that any updated children and their ancestors must be loaded.
-        for (idx, child) in self.children.iter_mut().enumerate() {
-            match child {
-                Child::Loaded(node) => {
-                    // Generate a new key for every block that was updated.
-                    // This makes the node dirty.
-                    for (i, k) in node.keys.iter_mut().enumerate() {
-                        if updated_blocks.contains(k) {
-                            node.vals[i] = utils::generate_key(rng);
-                            node.dirty = true;
-                        }
-                    }
+        // for (idx, child) in self.children.iter_mut().enumerate() {
+        //     match child {
+        //         Child::Loaded(node) => {
+        //             // Generate a new key for every block that was updated.
+        //             // This makes the node dirty.
+        //             for (i, k) in node.keys.iter_mut().enumerate() {
+        //                 if updated_blocks.contains(k) {
+        //                     node.vals[i] = utils::generate_key(rng);
+        //                     node.dirty = true;
+        //                 }
+        //             }
 
-                    // If the child was updated, then replace its key.
-                    if updated.contains(&node.id) {
-                        self.children_keys[idx] = utils::generate_key(rng);
-                    }
+        //             // If the child was updated, then replace its key.
+        //             if updated.contains(&node.id) {
+        //                 self.children_keys[idx] = utils::generate_key(rng);
+        //             }
 
-                    // Recursively commit children.
-                    node.commit::<C, R, S>(storage, rng, updated, updated_blocks)?;
-                }
-                Child::Unloaded(id) => {
-                    // If the child was updated, then replace its key.
-                    if updated.contains(id) {
-                        self.children_keys[idx] = utils::generate_key(rng);
-                    }
-                }
-            }
-        }
+        //             // Recursively commit children.
+        //             node.commit::<C, R, S>(storage, rng, updated, updated_blocks)?;
+        //         }
+        //         Child::Unloaded(id) => {
+        //             // If the child was updated, then replace its key.
+        //             if updated.contains(id) {
+        //                 self.children_keys[idx] = utils::generate_key(rng);
+        //             }
+        //         }
+        //     }
+        // }
 
         Ok(())
     }
